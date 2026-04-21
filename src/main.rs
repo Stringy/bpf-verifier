@@ -26,7 +26,7 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Verify { program, spec, verbose } => {
+        Commands::Verify { program: _, spec: _, verbose: _ } => {
             eprintln!("verify not yet implemented");
             std::process::exit(2);
         }
