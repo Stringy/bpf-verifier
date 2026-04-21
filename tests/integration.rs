@@ -16,10 +16,9 @@ fn spec_dir() -> PathBuf {
 }
 
 #[test]
-#[ignore] // requires F* to be installed
 fn verify_add_regs_good_spec() {
-    let obj = corpus_dir().join("good/add_regs.bpf.o");
-    let spec = spec_dir().join("good/add_regs.fst");
+    let obj = corpus_dir().join("good/AddRegs.bpf.o");
+    let spec = spec_dir().join("good/AddRegs.fst");
 
     let output = std::process::Command::new(cargo_bin("bpf-verifier"))
         .arg("verify")
@@ -43,10 +42,9 @@ fn verify_add_regs_good_spec() {
 }
 
 #[test]
-#[ignore] // requires F* to be installed
 fn verify_wrong_return_bad_spec() {
-    let obj = corpus_dir().join("bad/wrong_return.bpf.o");
-    let spec = spec_dir().join("bad/wrong_return.fst");
+    let obj = corpus_dir().join("bad/WrongReturn.bpf.o");
+    let spec = spec_dir().join("bad/WrongReturn.fst");
 
     let output = std::process::Command::new(cargo_bin("bpf-verifier"))
         .arg("verify")
@@ -74,7 +72,7 @@ fn parse_invalid_elf_fails() {
         .expect("failed to write to temp file");
     tmp.flush().expect("failed to flush temp file");
 
-    let spec = spec_dir().join("good/add_regs.fst");
+    let spec = spec_dir().join("good/AddRegs.fst");
 
     let output = std::process::Command::new(cargo_bin("bpf-verifier"))
         .arg("verify")

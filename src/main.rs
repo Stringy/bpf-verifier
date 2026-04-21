@@ -31,8 +31,6 @@ enum Commands {
     },
 }
 
-/// Walk up from the executable location to find the directory containing
-/// `fstar/`, falling back to the current directory.
 fn project_root() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         let mut dir = exe.parent().map(Path::to_path_buf);
@@ -87,14 +85,13 @@ fn run_verify(
     let prog = &bpf_object.programs[0];
     let program_name = &prog.section_name;
 
-    // 3. Derive spec module name from spec file path (file stem)
     let spec_module = spec_path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("Spec");
 
     // 4. Generate F* source
-    let fstar_source = generate_fstar(program_name, &prog.instructions, spec_module, "spec");
+    let fstar_source = generate_fstar(program_name, &prog.instructions, &spec_module, "spec");
 
     if verbose {
         eprintln!("--- Generated F* source ---");

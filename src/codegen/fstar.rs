@@ -23,7 +23,6 @@ pub fn generate_fstar(
     writeln!(out, "open BPF.State").unwrap();
     writeln!(out, "open BPF.Semantics").unwrap();
     writeln!(out, "open BPF.Spec").unwrap();
-    writeln!(out, "open BPF.Safety").unwrap();
     writeln!(out, "open BPF.Verify").unwrap();
     writeln!(out, "open {spec_module}").unwrap();
     writeln!(out).unwrap();
@@ -46,10 +45,9 @@ pub fn generate_fstar(
     writeln!(out, "let layout_constraints = trivial_constraints").unwrap();
     writeln!(out).unwrap();
 
-    // Proof obligation
     writeln!(
         out,
-        "let proof : squash (for_all_layouts layout_constraints (program_verified program {spec_name})) = ()"
+        "let proof : squash (program_satisfies program {spec_name}) = ()"
     )
     .unwrap();
 
@@ -75,12 +73,12 @@ mod tests {
         assert!(output.contains("open BPF.State"));
         assert!(output.contains("open BPF.Semantics"));
         assert!(output.contains("open BPF.Spec"));
-        assert!(output.contains("open BPF.Safety"));
         assert!(output.contains("open BPF.Verify"));
         assert!(output.contains("open TestSpec"));
-        assert!(output.contains("BPF_ALU64_REG MOV R0 R1"));
-        assert!(output.contains("BPF_ALU64_REG ADD R0 R2"));
+        assert!(output.contains("BPF_ALU64_REG MOV r0 r1"));
+        assert!(output.contains("BPF_ALU64_REG ADD r0 r2"));
         assert!(output.contains("BPF_EXIT"));
-        assert!(output.contains("program_verified program test_spec"));
+        assert!(output.contains("program_satisfies program test_spec"));
+        assert!(!output.contains("for_all_layouts"));
     }
 }
