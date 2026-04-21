@@ -132,11 +132,47 @@ impl std::fmt::Display for AluOp {
     }
 }
 
+/// Memory access width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemWidth {
+    B,
+    H,
+    W,
+    DW,
+}
+
+impl MemWidth {
+    fn from_size_bits(bits: u8) -> Option<Self> {
+        match bits {
+            0x00 => Some(MemWidth::W),
+            0x01 => Some(MemWidth::H),
+            0x02 => Some(MemWidth::B),
+            0x03 => Some(MemWidth::DW),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for MemWidth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            MemWidth::B => "W8",
+            MemWidth::H => "W16",
+            MemWidth::W => "W32",
+            MemWidth::DW => "W64",
+        };
+        write!(f, "{s}")
+    }
+}
+
 /// Decoded BPF opcode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opcode {
     Alu64(AluOp, Source),
     Alu32(AluOp, Source),
+    Ldx(MemWidth),
+    Stx(MemWidth),
+    St(MemWidth),
     Exit,
     Unknown(u8),
 }
@@ -161,6 +197,8 @@ impl Opcode {
             Source::Imm
         };
 
+        let size_bits = (raw >> 3) & 0x03;
+
         match class {
             0x07 => match AluOp::from_u8(op_nibble) {
                 Some(op) => Opcode::Alu64(op, source),
@@ -168,6 +206,18 @@ impl Opcode {
             },
             0x04 => match AluOp::from_u8(op_nibble) {
                 Some(op) => Opcode::Alu32(op, source),
+                None => Opcode::Unknown(raw),
+            },
+            0x01 => match MemWidth::from_size_bits(size_bits) {
+                Some(w) => Opcode::Ldx(w),
+                None => Opcode::Unknown(raw),
+            },
+            0x02 => match MemWidth::from_size_bits(size_bits) {
+                Some(w) => Opcode::St(w),
+                None => Opcode::Unknown(raw),
+            },
+            0x03 => match MemWidth::from_size_bits(size_bits) {
+                Some(w) => Opcode::Stx(w),
                 None => Opcode::Unknown(raw),
             },
             _ => Opcode::Unknown(raw),
@@ -225,6 +275,15 @@ impl BpfInsn {
             }
             Opcode::Alu32(op, Source::Imm) => {
                 format!("BPF_ALU32_IMM {} {} {}l", op, self.dst, self.imm)
+            }
+            Opcode::Ldx(w) => {
+                format!("BPF_LDX {} {} {} ({}l)", w, self.dst, self.src, self.offset)
+            }
+            Opcode::Stx(w) => {
+                format!("BPF_STX {} {} {} ({}l)", w, self.dst, self.src, self.offset)
+            }
+            Opcode::St(w) => {
+                format!("BPF_ST {} {} ({}l) ({}l)", w, self.dst, self.offset, self.imm)
             }
             Opcode::Exit => "BPF_EXIT".to_string(),
             Opcode::Unknown(raw) => format!("BPF_UNKNOWN 0x{:02x}", raw),

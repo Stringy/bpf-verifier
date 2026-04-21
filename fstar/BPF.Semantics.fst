@@ -1,5 +1,6 @@
 module BPF.Semantics
 
+open FStar.Mul
 open FStar.UInt64
 open FStar.UInt32
 open FStar.Int32
@@ -15,6 +16,9 @@ type bpf_insn =
   | BPF_ALU64_IMM : alu_op -> reg_idx -> Int32.t -> bpf_insn
   | BPF_ALU32_REG : alu_op -> reg_idx -> reg_idx -> bpf_insn
   | BPF_ALU32_IMM : alu_op -> reg_idx -> Int32.t -> bpf_insn
+  | BPF_LDX : mem_width -> reg_idx -> reg_idx -> Int32.t -> bpf_insn
+  | BPF_STX : mem_width -> reg_idx -> reg_idx -> Int32.t -> bpf_insn
+  | BPF_ST  : mem_width -> reg_idx -> Int32.t -> Int32.t -> bpf_insn
   | BPF_EXIT : bpf_insn
 
 type bpf_program = list bpf_insn
@@ -22,6 +26,9 @@ type bpf_program = list bpf_insn
 let sign_extend_imm (imm: Int32.t) : UInt64.t =
   let i64 = int32_to_int64 imm in
   FStar.Int.Cast.Full.int64_to_uint64 i64
+
+let sign_extend_to_int (imm: Int32.t) : int =
+  Int32.v imm
 
 let alu64 (op: alu_op) (dst_val src_val: UInt64.t) : option UInt64.t =
   match op with
@@ -61,6 +68,9 @@ let alu32 (op: alu_op) (dst_val src_val: UInt64.t) : option UInt64.t =
   | None -> None
   | Some r -> Some (UInt64.uint_to_t (UInt32.v r))
 
+let compute_offset (base_val: UInt64.t) (off: Int32.t) : int =
+  UInt64.v base_val + sign_extend_to_int off
+
 let exec_insn (st: bpf_state) (insn: bpf_insn) : option bpf_state =
   match insn with
   | BPF_ALU64_REG op dst src ->
@@ -87,6 +97,25 @@ let exec_insn (st: bpf_state) (insn: bpf_insn) : option bpf_state =
     (match alu32 op dst_val imm_val with
      | None -> None
      | Some result -> Some (state_set_reg st dst result))
+  | BPF_LDX w dst src off ->
+    if src <> r10 then None
+    else
+      let offset = sign_extend_to_int off in
+      (match stack_load st offset w with
+       | None -> None
+       | Some v -> Some (state_set_reg st dst v))
+  | BPF_STX w dst src off ->
+    if dst <> r10 then None
+    else
+      let offset = sign_extend_to_int off in
+      let v = state_get_reg st src in
+      stack_store st offset w v
+  | BPF_ST w dst off imm ->
+    if dst <> r10 then None
+    else
+      let offset = sign_extend_to_int off in
+      let v = sign_extend_imm imm in
+      stack_store st offset w v
   | BPF_EXIT -> Some st
 
 let rec exec_program (st: bpf_state) (prog: bpf_program)
