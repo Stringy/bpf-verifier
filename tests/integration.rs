@@ -1,43 +1,31 @@
-mod helpers;
-
 use std::io::Write;
 use std::path::PathBuf;
 
 use assert_cmd::cargo::cargo_bin;
 
-use helpers::elf_builder::*;
-
-/// Return the project root directory.
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Build a test ELF from raw instruction words and write it to a temporary file.
-fn build_test_elf(instructions: &[u64]) -> tempfile::NamedTempFile {
-    let elf_bytes = build_bpf_elf("test_prog", instructions);
-    let mut tmp = tempfile::NamedTempFile::new().expect("failed to create temp file");
-    tmp.write_all(&elf_bytes)
-        .expect("failed to write ELF to temp file");
-    tmp.flush().expect("failed to flush temp file");
-    tmp
+fn corpus_dir() -> PathBuf {
+    PathBuf::from(env!("OUT_DIR")).join("corpus")
+}
+
+fn spec_dir() -> PathBuf {
+    project_root().join("tests/corpus")
 }
 
 #[test]
 #[ignore] // requires F* to be installed
 fn verify_add_regs_good_spec() {
-    let instructions = &[
-        bpf_insn(BPF_ALU64_REG_MOV, 0, 1, 0, 0), // mov r0, r1
-        bpf_insn(BPF_ALU64_REG_ADD, 0, 2, 0, 0),  // add r0, r2
-        bpf_insn(BPF_EXIT, 0, 0, 0, 0),            // exit
-    ];
-    let elf_file = build_test_elf(instructions);
-    let spec_path = project_root().join("tests/corpus/good/AddRegs.fst");
+    let obj = corpus_dir().join("good/add_regs.bpf.o");
+    let spec = spec_dir().join("good/add_regs.fst");
 
     let output = std::process::Command::new(cargo_bin("bpf-verifier"))
         .arg("verify")
-        .arg(elf_file.path())
+        .arg(&obj)
         .arg("--spec")
-        .arg(&spec_path)
+        .arg(&spec)
         .output()
         .expect("failed to run bpf-verifier");
 
@@ -56,20 +44,15 @@ fn verify_add_regs_good_spec() {
 
 #[test]
 #[ignore] // requires F* to be installed
-fn verify_add_regs_bad_spec() {
-    let instructions = &[
-        bpf_insn(BPF_ALU64_REG_MOV, 0, 1, 0, 0), // mov r0, r1
-        bpf_insn(BPF_ALU64_REG_ADD, 0, 2, 0, 0),  // add r0, r2
-        bpf_insn(BPF_EXIT, 0, 0, 0, 0),            // exit
-    ];
-    let elf_file = build_test_elf(instructions);
-    let spec_path = project_root().join("tests/corpus/bad/WrongReturn.fst");
+fn verify_wrong_return_bad_spec() {
+    let obj = corpus_dir().join("bad/wrong_return.bpf.o");
+    let spec = spec_dir().join("bad/wrong_return.fst");
 
     let output = std::process::Command::new(cargo_bin("bpf-verifier"))
         .arg("verify")
-        .arg(elf_file.path())
+        .arg(&obj)
         .arg("--spec")
-        .arg(&spec_path)
+        .arg(&spec)
         .output()
         .expect("failed to run bpf-verifier");
 
@@ -91,13 +74,13 @@ fn parse_invalid_elf_fails() {
         .expect("failed to write to temp file");
     tmp.flush().expect("failed to flush temp file");
 
-    let spec_path = project_root().join("tests/corpus/good/AddRegs.fst");
+    let spec = spec_dir().join("good/add_regs.fst");
 
     let output = std::process::Command::new(cargo_bin("bpf-verifier"))
         .arg("verify")
         .arg(tmp.path())
         .arg("--spec")
-        .arg(&spec_path)
+        .arg(&spec)
         .output()
         .expect("failed to run bpf-verifier");
 
