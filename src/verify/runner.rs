@@ -58,6 +58,7 @@ impl FstarRunner {
             cmd.arg("--include").arg(dir);
         }
 
+        cmd.args(["--fuel", "8", "--ifuel", "2", "--z3rlimit", "30"]);
         cmd.arg(fstar_file);
 
         let output = cmd.output().map_err(VerifyError::FstarInvocation)?;
