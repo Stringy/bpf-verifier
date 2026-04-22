@@ -346,13 +346,13 @@ impl BpfInsn {
                 format!("BPF_ALU64_REG {} {} {}", op, self.dst, self.src)
             }
             Opcode::Alu64(op, Source::Imm) => {
-                format!("BPF_ALU64_IMM {} {} {}l", op, self.dst, self.imm)
+                format!("BPF_ALU64_IMM {} {} ({}l)", op, self.dst, self.imm)
             }
             Opcode::Alu32(op, Source::Reg) => {
                 format!("BPF_ALU32_REG {} {} {}", op, self.dst, self.src)
             }
             Opcode::Alu32(op, Source::Imm) => {
-                format!("BPF_ALU32_IMM {} {} {}l", op, self.dst, self.imm)
+                format!("BPF_ALU32_IMM {} {} ({}l)", op, self.dst, self.imm)
             }
             Opcode::Ldx(w) => {
                 format!("BPF_LDX {} {} {} ({}l)", w, self.dst, self.src, self.offset)
@@ -423,7 +423,7 @@ mod tests {
         assert_eq!(insn.opcode, Opcode::Alu64(AluOp::Add, Source::Imm));
         assert_eq!(insn.dst, Reg::R0);
         assert_eq!(insn.imm, 42);
-        assert_eq!(insn.to_fstar(), "BPF_ALU64_IMM ADD r0 42l");
+        assert_eq!(insn.to_fstar(), "BPF_ALU64_IMM ADD r0 (42l)");
     }
 
     #[test]
@@ -456,6 +456,6 @@ mod tests {
         assert_eq!(insn.opcode, Opcode::Alu64(AluOp::Mov, Source::Imm));
         assert_eq!(insn.dst, Reg::R0);
         assert_eq!(insn.imm, 0);
-        assert_eq!(insn.to_fstar(), "BPF_ALU64_IMM MOV r0 0l");
+        assert_eq!(insn.to_fstar(), "BPF_ALU64_IMM MOV r0 (0l)");
     }
 }

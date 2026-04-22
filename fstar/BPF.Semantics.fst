@@ -148,7 +148,7 @@ let reg_val_for_jmp (v: reg_val) : option UInt64.t =
   | Scalar n -> Some n
   | Null -> Some 0uL
   | MapValuePtr _ -> None
-  | FramePtr -> None
+  | FramePtr _ -> None
 
 (* Check if a register value is "truthy" for branch purposes.
    Non-null pointers are truthy, null is falsy, scalars compare normally. *)
@@ -157,15 +157,17 @@ let reg_val_is_zero (v: reg_val) : option bool =
   | Scalar n -> Some (n = 0uL)
   | Null -> Some true
   | MapValuePtr _ -> Some false
-  | FramePtr -> Some false
+  | FramePtr _ -> Some false
 
 (* Execute one instruction. Returns the new state or None on UB.
 
-   ALU ops extract scalar values — performing arithmetic on a pointer is UB.
-   MOV with immediate always produces a Scalar.
+   ALU ops usually require scalar operands. Exceptions:
+   - MOV copies any register value (including pointers)
+   - ADD/SUB of a scalar immediate to a FramePtr adjusts the offset.
+     This models the common pattern: r2 = r10; r2 += -4
 
    Memory loads dispatch on the base register type:
-   - FramePtr -> stack access (as before)
+   - FramePtr off -> stack access at off + instruction offset
    - MapValuePtr -> read from map value memory
    - Scalar/Null -> UB (invalid pointer dereference)
 
@@ -176,47 +178,85 @@ let reg_val_is_zero (v: reg_val) : option bool =
 let exec_insn (st: bpf_state) (insn: bpf_insn) : option bpf_state =
   match insn with
   | BPF_ALU64_REG op dst src ->
-    (match scalar_val (state_get_reg st dst), scalar_val (state_get_reg st src) with
-     | Some dv, Some sv ->
-       (match alu64 op dv sv with
-        | None -> None
-        | Some result -> Some (state_set_reg st dst (Scalar result)))
-     | _, _ -> None)
+    let dv = state_get_reg st dst in
+    let sv = state_get_reg st src in
+    (match op with
+     | MOV -> Some (state_set_reg st dst sv)
+     | _ ->
+       (match scalar_val dv, scalar_val sv with
+        | Some d, Some s ->
+          (match alu64 op d s with
+           | None -> None
+           | Some result -> Some (state_set_reg st dst (Scalar result)))
+        | _, _ -> None))
   | BPF_ALU64_IMM op dst imm ->
-    (match scalar_val (state_get_reg st dst) with
-     | Some dv ->
-       let iv = sign_extend_imm imm in
-       (match alu64 op dv iv with
-        | None -> None
-        | Some result -> Some (state_set_reg st dst (Scalar result)))
-     | None ->
-       if op = MOV then Some (state_set_reg st dst (Scalar (sign_extend_imm imm)))
-       else None)
+    let dv = state_get_reg st dst in
+    let iv = sign_extend_to_int imm in
+    (match op with
+     | MOV -> Some (state_set_reg st dst (Scalar (sign_extend_imm imm)))
+     | ADD ->
+       (match dv with
+        | Scalar d ->
+          (match alu64 ADD d (sign_extend_imm imm) with
+           | None -> None
+           | Some result -> Some (state_set_reg st dst (Scalar result)))
+        | FramePtr off -> Some (state_set_reg st dst (FramePtr (off + iv)))
+        | _ -> None)
+     | SUB ->
+       (match dv with
+        | Scalar d ->
+          (match alu64 SUB d (sign_extend_imm imm) with
+           | None -> None
+           | Some result -> Some (state_set_reg st dst (Scalar result)))
+        | FramePtr off -> Some (state_set_reg st dst (FramePtr (off - iv)))
+        | _ -> None)
+     | _ ->
+       (match scalar_val dv with
+        | Some d ->
+          (match alu64 op d (sign_extend_imm imm) with
+           | None -> None
+           | Some result -> Some (state_set_reg st dst (Scalar result)))
+        | None -> None))
   | BPF_ALU32_REG op dst src ->
-    (match scalar_val (state_get_reg st dst), scalar_val (state_get_reg st src) with
-     | Some dv, Some sv ->
-       (match alu32 op dv sv with
-        | None -> None
-        | Some result -> Some (state_set_reg st dst (Scalar result)))
-     | _, _ -> None)
+    let dv = state_get_reg st dst in
+    let sv = state_get_reg st src in
+    (match op with
+     | MOV ->
+       (match scalar_val sv with
+        | Some s ->
+          (match alu32 MOV s s with
+           | Some result -> Some (state_set_reg st dst (Scalar result))
+           | None -> None)
+        | None -> None)
+     | _ ->
+       (match scalar_val dv, scalar_val sv with
+        | Some d, Some s ->
+          (match alu32 op d s with
+           | None -> None
+           | Some result -> Some (state_set_reg st dst (Scalar result)))
+        | _, _ -> None))
   | BPF_ALU32_IMM op dst imm ->
-    (match scalar_val (state_get_reg st dst) with
-     | Some dv ->
-       let iv = sign_extend_imm imm in
-       (match alu32 op dv iv with
-        | None -> None
-        | Some result -> Some (state_set_reg st dst (Scalar result)))
-     | None ->
-       if op = MOV then Some (state_set_reg st dst (Scalar (sign_extend_imm imm)))
-       else None)
+    let dv = state_get_reg st dst in
+    (match op with
+     | MOV -> Some (state_set_reg st dst (Scalar (sign_extend_imm imm)))
+     | _ ->
+       (match scalar_val dv with
+        | Some d ->
+          let iv = sign_extend_imm imm in
+          (match alu32 op d iv with
+           | None -> None
+           | Some result -> Some (state_set_reg st dst (Scalar result)))
+        | None -> None))
   | BPF_LD_IMM64 dst imm ->
     Some (state_set_reg st dst (Scalar imm))
+  (* Memory loads: the base register determines the memory region.
+     The effective offset = base pointer's offset + instruction offset. *)
   | BPF_LDX w dst src off ->
     let base = state_get_reg st src in
+    let insn_off = sign_extend_to_int off in
     (match base with
-     | FramePtr ->
-       let offset = sign_extend_to_int off in
-       (match stack_load st offset w with
+     | FramePtr ptr_off ->
+       (match stack_load st (ptr_off + insn_off) w with
         | None -> None
         | Some v -> Some (state_set_reg st dst (Scalar v)))
      | MapValuePtr id ->
@@ -227,20 +267,20 @@ let exec_insn (st: bpf_state) (insn: bpf_insn) : option bpf_state =
      | Scalar _ -> None)
   | BPF_STX w dst src off ->
     let base = state_get_reg st dst in
+    let insn_off = sign_extend_to_int off in
     (match base with
-     | FramePtr ->
-       let offset = sign_extend_to_int off in
+     | FramePtr ptr_off ->
        (match scalar_val (state_get_reg st src) with
-        | Some v -> stack_store st offset w v
+        | Some v -> stack_store st (ptr_off + insn_off) w v
         | None -> None)
      | _ -> None)
   | BPF_ST w dst off imm ->
     let base = state_get_reg st dst in
+    let insn_off = sign_extend_to_int off in
     (match base with
-     | FramePtr ->
-       let offset = sign_extend_to_int off in
+     | FramePtr ptr_off ->
        let v = sign_extend_imm imm in
-       stack_store st offset w v
+       stack_store st (ptr_off + insn_off) w v
      | _ -> None)
   | BPF_JMP64_REG op dst src offset ->
     (match reg_val_for_jmp (state_get_reg st dst), reg_val_for_jmp (state_get_reg st src) with

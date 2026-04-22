@@ -26,7 +26,11 @@ open FStar.Seq
 (* --- Register values ---
    A register can hold:
    - Scalar: a plain 64-bit value (arithmetic result, immediate, etc.)
-   - FramePtr: the stack frame pointer (r10 at programme entry)
+   - FramePtr: a pointer into the stack frame. Carries an offset from the
+     top of the stack (r10). At programme entry r10 = FramePtr 0. The
+     compiler often copies r10 to another register and adds a negative
+     offset to compute a stack address, e.g. r2 = r10; r2 += -4 produces
+     FramePtr (-4). Load/store through a FramePtr uses its offset.
    - MapValuePtr: a pointer to a map value, returned by bpf_map_lookup_elem.
      The nat is a unique ID for this particular lookup result. Dereferencing
      a MapValuePtr reads from the map; dereferencing anything else is UB.
@@ -36,7 +40,7 @@ open FStar.Seq
    programmes that can reach a load/store through Null or Scalar. *)
 type reg_val =
   | Scalar : UInt64.t -> reg_val
-  | FramePtr : reg_val
+  | FramePtr : int -> reg_val
   | MapValuePtr : nat -> reg_val
   | Null : reg_val
 
