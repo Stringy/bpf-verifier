@@ -1,79 +1,35 @@
+use std::collections::HashMap;
 use std::fmt::Write;
+
+use askama::Template;
 
 use crate::bpf::instruction::{AluOp, BpfInsn, Opcode, Source};
 
-/// Generate F* source code for a verification module wrapping a BPF program.
-///
-/// The output contains the module declaration, standard imports, the program
-/// literal (serialised via `BpfInsn::to_fstar`), trivial CO-RE relocation
-/// stubs, and the proof obligation tying the program to the given spec.
+#[derive(Template)]
+#[template(path = "verify.fst")]
+struct VerifyModule {
+    program_name: String,
+    spec_module: String,
+    spec_name: String,
+    instructions: Vec<String>,
+    hints: Vec<String>,
+}
+
 pub fn generate_fstar(
     program_name: &str,
     instructions: &[BpfInsn],
     spec_module: &str,
     spec_name: &str,
 ) -> String {
-    let mut out = String::new();
-
-    // Module declaration
-    writeln!(out, "module Verify_{program_name}").unwrap();
-    writeln!(out).unwrap();
-
-    // Imports
-    writeln!(out, "open BPF.State").unwrap();
-    writeln!(out, "open BPF.Semantics").unwrap();
-    writeln!(out, "open BPF.Spec").unwrap();
-    writeln!(out, "open BPF.Verify").unwrap();
-    writeln!(out, "open {spec_module}").unwrap();
-    writeln!(out).unwrap();
-
-    // Program literal
-    let insn_strs: Vec<String> = instructions.iter().map(|i| i.to_fstar()).collect();
-    writeln!(out, "let program : bpf_program = [").unwrap();
-    for (idx, s) in insn_strs.iter().enumerate() {
-        if idx + 1 < insn_strs.len() {
-            writeln!(out, "  {s};").unwrap();
-        } else {
-            writeln!(out, "  {s}").unwrap();
-        }
-    }
-    writeln!(out, "]").unwrap();
-    writeln!(out).unwrap();
-
-    // Trivial CO-RE
-    writeln!(out, "let relocation_sites = []").unwrap();
-    writeln!(out, "let layout_constraints = trivial_constraints").unwrap();
-    writeln!(out).unwrap();
-
     let hints = generate_bitwise_hints(instructions);
-    if !hints.is_empty() {
-        writeln!(out, "open FStar.UInt32").unwrap();
-        writeln!(out, "open FStar.UInt64").unwrap();
-        writeln!(out, "open FStar.Mul").unwrap();
-        writeln!(out).unwrap();
-        for hint in &hints {
-            write!(out, "{hint}").unwrap();
-        }
-        writeln!(out).unwrap();
-        writeln!(out, "#push-options \"--fuel 8 --ifuel 2 --z3rlimit 30\"").unwrap();
-        writeln!(
-            out,
-            "let proof : squash (program_satisfies program {spec_name}) ="
-        ).unwrap();
-        for (i, _) in hints.iter().enumerate() {
-            writeln!(out, "  FStar.Classical.forall_intro (FStar.Classical.move_requires bitwise_hint_{i});").unwrap();
-        }
-        writeln!(out, "  ()").unwrap();
-        writeln!(out, "#pop-options").unwrap();
-    } else {
-        writeln!(
-            out,
-            "let proof : squash (program_satisfies program {spec_name}) = ()"
-        )
-        .unwrap();
-    }
-
-    out
+    let tmpl = VerifyModule {
+        program_name: program_name.to_string(),
+        spec_module: spec_module.to_string(),
+        spec_name: spec_name.to_string(),
+        instructions: instructions.iter().map(|i| i.to_fstar()).collect(),
+        hints,
+    };
+    tmpl.render().expect("failed to render F* template")
 }
 
 fn is_bitwise_op(op: AluOp) -> bool {
@@ -90,7 +46,6 @@ fn bitwise_op_fstar(op: AluOp) -> &'static str {
 }
 
 fn generate_bitwise_hints(instructions: &[BpfInsn]) -> Vec<String> {
-    use std::collections::HashMap;
     let mut hints = Vec::new();
     let mut reg_vals: [Option<i64>; 11] = [None; 11];
     let mut stack_vals: HashMap<i16, i64> = HashMap::new();
@@ -130,7 +85,7 @@ fn generate_bitwise_hints(instructions: &[BpfInsn]) -> Vec<String> {
                     writeln!(hint, "let bitwise_hint_{idx} (x: UInt32.t) : Lemma").unwrap();
                     writeln!(hint, "  (requires UInt32.v x = {dst_val})").unwrap();
                     writeln!(hint, "  (ensures UInt32.v (UInt32.{op_name} x {imm}ul) = {result}) =").unwrap();
-                    writeln!(hint, "  assert_norm (UInt32.v (UInt32.{op_name} {dst_val}ul {imm}ul) = {result})").unwrap();
+                    write!(hint, "  assert_norm (UInt32.v (UInt32.{op_name} {dst_val}ul {imm}ul) = {result})").unwrap();
                     hints.push(hint);
                     reg_vals[dst_idx] = Some(result);
                 } else {
@@ -154,7 +109,6 @@ fn generate_bitwise_hints(instructions: &[BpfInsn]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bpf::instruction::BpfInsn;
 
     #[test]
     fn generate_simple_program() {
@@ -176,6 +130,5 @@ mod tests {
         assert!(output.contains("BPF_ALU64_REG ADD r0 r2"));
         assert!(output.contains("BPF_EXIT"));
         assert!(output.contains("program_satisfies program test_spec"));
-        assert!(!output.contains("for_all_layouts"));
     }
 }

@@ -1,0 +1,38 @@
+module Verify_{{ program_name }}
+
+open BPF.State
+open BPF.Semantics
+open BPF.Spec
+open BPF.Verify
+open {{ spec_module }}
+
+let program : bpf_program = [
+{%- for insn in instructions %}
+  {{ insn }}{% if !loop.last %};{% endif %}
+{%- endfor %}
+
+]
+
+let relocation_sites = []
+let layout_constraints = trivial_constraints
+{%- if !hints.is_empty() %}
+
+open FStar.UInt32
+open FStar.UInt64
+open FStar.Mul
+{% for hint in hints %}
+
+{{ hint }}
+{%- endfor %}
+
+#push-options "--fuel 8 --ifuel 2 --z3rlimit 30"
+let proof : squash (program_satisfies program {{ spec_name }}) =
+{%- for i in 0..hints.len() %}
+  FStar.Classical.forall_intro (FStar.Classical.move_requires bitwise_hint_{{ i }});
+{%- endfor %}
+  ()
+#pop-options
+{%- else %}
+
+let proof : squash (program_satisfies program {{ spec_name }}) = ()
+{%- endif %}
