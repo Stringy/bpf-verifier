@@ -239,7 +239,7 @@ let check_insn_ts (abs: abs_state_ts) (insn: bpf_insn) : option abs_state_ts =
     let abs5 = ts_set abs4 4 TUnknown in
     let abs6 = ts_set abs5 5 TUnknown in
     Some abs6
-  | BPF_CALL (UNKNOWN_HELPER _) ->
+  | BPF_CALL _ ->
     let abs1 = ts_set abs 0 TUnknown in
     let abs2 = ts_set abs1 1 TUnknown in
     let abs3 = ts_set abs2 2 TUnknown in

@@ -272,7 +272,7 @@ let exec_insn_safe (st: bpf_state) (insn: bpf_insn) (ev: safety_evidence) : opti
         regs = set_reg st.regs r0 (MapValuePtr id);
         pc = st.pc + 1;
         next_map_id = id + 1 }
-  | BPF_CALL (UNKNOWN_HELPER _) -> None
+  | BPF_CALL _ -> None
   | BPF_EXIT -> Some st
 
 (* Execute a full programme with safety evidence.

@@ -36,9 +36,15 @@ type jmp_op =
   | JNE | JLT | JLE
   | JSGT | JSGE | JSLT | JSLE
 
-(* BPF helper function IDs. Only map_lookup_elem is modelled so far. *)
+(* BPF helper function IDs. Each corresponds to a linux kernel helper.
+   The helper's semantics are defined in BPF.Helpers.get_helper_spec. *)
 type helper_id =
-  | MAP_LOOKUP_ELEM  (* helper #1 *)
+  | MAP_LOOKUP_ELEM    (* helper #1 -- look up a key in a BPF map *)
+  | MAP_UPDATE_ELEM    (* helper #2 -- insert or update a key-value pair *)
+  | MAP_DELETE_ELEM    (* helper #3 -- delete a key from a BPF map *)
+  | PROBE_READ         (* helper #4 -- safely read from kernel memory *)
+  | KTIME_GET_NS       (* helper #5 -- get current time in nanoseconds *)
+  | GET_PRANDOM_U32    (* helper #7 -- get a pseudo-random 32-bit number *)
   | UNKNOWN_HELPER : nat -> helper_id
 
 type bpf_insn =
@@ -336,7 +342,7 @@ let exec_insn (st: bpf_state) (insn: bpf_insn) : option bpf_state =
       regs = set_reg st.regs r0 (MapValuePtr id);
       pc = st.pc + 1;
       next_map_id = id + 1 }
-  | BPF_CALL (UNKNOWN_HELPER _) -> None
+  | BPF_CALL _ -> None
   | BPF_EXIT -> Some st
 
 (* Drop the first `n` elements of a list. *)

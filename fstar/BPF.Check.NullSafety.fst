@@ -322,9 +322,9 @@ let check_insn_ns (abs: abs_state_ns) (insn: bpf_insn) (pc: int) (targets: branc
     let abs5 = ns_set abs4 4 NotMap in
     let abs6 = ns_set abs5 5 NotMap in
     Some (abs6, targets)
-  (* Unknown helpers: we don't know what they return, so assume
+  (* Other helpers: we don't know what they return, so assume
      the result is not a map pointer. Clobber r0-r5. *)
-  | BPF_CALL (UNKNOWN_HELPER _) ->
+  | BPF_CALL _ ->
     let abs1 = ns_set abs 0 NotMap in
     let abs2 = ns_set abs1 1 NotMap in
     let abs3 = ns_set abs2 2 NotMap in
