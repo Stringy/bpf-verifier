@@ -20,8 +20,8 @@ enum Commands {
         #[arg(help = "Path to BPF object file")]
         program: PathBuf,
 
-        #[arg(long, help = "Path to F* spec file")]
-        spec: PathBuf,
+        #[arg(long, help = "Path to F* spec file (omit for crash-safety default)")]
+        spec: Option<PathBuf>,
 
         #[arg(long, help = "Show detailed verification output")]
         verbose: bool,
@@ -53,14 +53,14 @@ fn main() {
             verbose,
             fstar_path,
         } => {
-            std::process::exit(run_verify(&program, &spec, verbose, fstar_path.as_deref()));
+            std::process::exit(run_verify(&program, spec.as_deref(), verbose, fstar_path.as_deref()));
         }
     }
 }
 
 fn run_verify(
     program_path: &Path,
-    spec_path: &Path,
+    spec_path: Option<&Path>,
     verbose: bool,
     fstar_path_override: Option<&Path>,
 ) -> i32 {
@@ -91,13 +91,19 @@ fn run_verify(
     };
     let program_name = &prog.section_name;
 
-    let spec_module = spec_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("Spec");
+    // 3. Determine spec module — user-provided or default crash safety
+    let (spec_module, spec_name) = if let Some(path) = spec_path {
+        let module = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Spec");
+        (module, "spec")
+    } else {
+        ("BPF.DefaultSpec", "spec")
+    };
 
     // 4. Generate F* source
-    let fstar_source = generate_fstar(program_name, &prog.instructions, spec_module, "spec");
+    let fstar_source = generate_fstar(program_name, &prog.instructions, spec_module, spec_name);
 
     if verbose {
         eprintln!("--- Generated F* source ---");
@@ -121,18 +127,19 @@ fn run_verify(
         return 2;
     }
 
-    // 6. Copy the user's spec file into the temp dir so F* can find it
-    let spec_dest = tmp_dir.path().join(
-        spec_path
-            .file_name()
-            .unwrap_or_else(|| std::ffi::OsStr::new("Spec.fst")),
-    );
-    if let Err(e) = std::fs::copy(spec_path, &spec_dest) {
-        eprintln!(
-            "error: failed to copy spec file {}: {e}",
-            spec_path.display()
+    // 6. Copy the user's spec file into the temp dir (if provided)
+    if let Some(path) = spec_path {
+        let spec_dest = tmp_dir.path().join(
+            path.file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("Spec.fst")),
         );
-        return 2;
+        if let Err(e) = std::fs::copy(path, &spec_dest) {
+            eprintln!(
+                "error: failed to copy spec file {}: {e}",
+                path.display()
+            );
+            return 2;
+        }
     }
 
     // 7. Find F* binary and set up include dirs
@@ -153,7 +160,11 @@ fn run_verify(
     // 9. Run verification
     match runner.verify(&fst_path) {
         Ok(VerifyResult::Pass) => {
-            println!("OK: {program_name} satisfies spec");
+            if spec_path.is_some() {
+                println!("OK: {program_name} satisfies spec");
+            } else {
+                println!("OK: {program_name} verified (crash safety + safety layers)");
+            }
             0
         }
         Ok(VerifyResult::Fail { message }) => {
