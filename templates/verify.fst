@@ -9,6 +9,7 @@ open BPF.Verify
 open BPF.Tactic
 open BPF.Check.StackBounds
 open BPF.Check.TypeSafety
+open BPF.Check.NullSafety
 open BPF.Tactic.Layered
 open {{ spec_module }}
 
@@ -39,6 +40,14 @@ let sb_proof : squash (stack_bounds_check program = true) =
 let ts_proof : squash (type_check program = true) =
   _ by (type_check_tac ())
 #pop-options
+{%- if has_map_calls %}
+
+(* Null safety — verified by branch-aware analysis *)
+#push-options "--z3rlimit 60"
+let ns_proof : squash (null_check program = true) =
+  _ by (null_check_tac ())
+#pop-options
+{%- endif %}
 
 (* Functional correctness *)
 #push-options "--z3rlimit 60"

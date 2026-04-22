@@ -27,6 +27,7 @@ open BPF.Spec
 open BPF.Verify
 open BPF.Check.StackBounds
 open BPF.Check.TypeSafety
+open BPF.Check.NullSafety
 open BPF.Exec.Safe
 
 (*
@@ -72,6 +73,30 @@ let stack_bounds_tac () : Tac unit =
    decidable check to true on concrete programmes.
 *)
 let type_check_tac () : Tac unit =
+  norm [delta; iota; zeta; primops];
+  trivial ()
+
+(*
+   Prove that a concrete programme passes null_check.
+
+   How it works:
+   - null_check is a decidable boolean function that performs branch-aware
+     analysis to verify that all map value reads are protected by null checks
+   - For a concrete programme (known instruction list), normalisation
+     evaluates the checker step-by-step to either true or false
+   - norm [delta; iota; zeta; primops] performs full normalisation:
+     * delta: unfold all definitions
+     * iota: reduce pattern matches
+     * zeta: reduce let bindings
+     * primops: evaluate primitive operations (arithmetic, comparisons)
+   - After normalisation, the goal becomes `true == true`, which trivial()
+     discharges immediately without invoking Z3
+
+   Use this tactic when you need to prove null safety for a programme that
+   uses map lookups. Same strategy as the other check tactics: full
+   normalisation evaluates the decidable check to true on concrete programmes.
+*)
+let null_check_tac () : Tac unit =
   norm [delta; iota; zeta; primops];
   trivial ()
 

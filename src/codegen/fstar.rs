@@ -130,6 +130,7 @@ mod tests {
         assert!(output.contains("open BPF.Verify"));
         assert!(output.contains("open BPF.Check.StackBounds"));
         assert!(output.contains("open BPF.Check.TypeSafety"));
+        assert!(output.contains("open BPF.Check.NullSafety"));
         assert!(output.contains("open BPF.Tactic.Layered"));
         assert!(output.contains("open TestSpec"));
         assert!(output.contains("BPF_ALU64_REG MOV r0 r1"));
