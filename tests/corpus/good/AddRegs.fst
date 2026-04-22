@@ -6,5 +6,5 @@ open BPF.Spec
 
 let spec : bpf_spec =
   post_only (fun final_st ->
-    state_get_reg final_st r0 == 0uL
+    state_get_reg final_st r0 == Scalar 0uL
   )

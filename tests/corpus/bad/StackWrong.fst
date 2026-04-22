@@ -7,5 +7,5 @@ open BPF.Spec
 (* Claims the program returns 99, but it actually returns 42. *)
 let spec : bpf_spec =
   post_only (fun final_st ->
-    state_get_reg final_st r0 == 99uL
+    state_get_reg final_st r0 == Scalar 99uL
   )

@@ -225,6 +225,8 @@ pub enum Opcode {
     Jmp64(JmpOp, Source),
     Jmp32(JmpOp, Source),
     JmpJa,
+    Call,
+    LdImm64,
     Exit,
     Unknown(u8),
 }
@@ -237,6 +239,12 @@ impl Opcode {
     pub fn decode(raw: u8) -> Self {
         if raw == 0x95 {
             return Opcode::Exit;
+        }
+        if raw == 0x85 {
+            return Opcode::Call;
+        }
+        if raw == 0x18 {
+            return Opcode::LdImm64;
         }
 
         let class = raw & 0x07;
@@ -301,6 +309,7 @@ pub struct BpfInsn {
     pub src: Reg,
     pub offset: i16,
     pub imm: i32,
+    pub imm64: Option<u64>,
 }
 
 impl BpfInsn {
@@ -326,6 +335,7 @@ impl BpfInsn {
             src,
             offset,
             imm,
+            imm64: None,
         })
     }
 
@@ -367,6 +377,17 @@ impl BpfInsn {
             }
             Opcode::JmpJa => {
                 format!("BPF_JMP_JA {}", self.offset)
+            }
+            Opcode::Call => {
+                let helper = match self.imm {
+                    1 => "MAP_LOOKUP_ELEM".to_string(),
+                    id => format!("(UNKNOWN_HELPER {})", id),
+                };
+                format!("BPF_CALL {helper}")
+            }
+            Opcode::LdImm64 => {
+                let val = self.imm64.unwrap_or(self.imm as u32 as u64);
+                format!("BPF_LD_IMM64 {} {}uL", self.dst, val)
             }
             Opcode::Exit => "BPF_EXIT".to_string(),
             Opcode::Unknown(raw) => format!("BPF_UNKNOWN 0x{:02x}", raw),

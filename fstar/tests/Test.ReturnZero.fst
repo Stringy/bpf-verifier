@@ -14,7 +14,7 @@ let return_zero_program : bpf_program = [
 
 let return_zero_spec : bpf_spec =
   post_only (fun final_st ->
-    state_get_reg final_st r0 == 0uL
+    state_get_reg final_st r0 == Scalar 0uL
   )
 
 let return_zero_proof : squash (program_satisfies return_zero_program return_zero_spec) =

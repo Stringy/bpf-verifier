@@ -7,5 +7,5 @@ open BPF.Spec
 (* x = 10, which is > 5, so the branch is taken and r0 = 1 *)
 let spec : bpf_spec =
   post_only (fun final_st ->
-    state_get_reg final_st r0 == 1uL
+    state_get_reg final_st r0 == Scalar 1uL
   )

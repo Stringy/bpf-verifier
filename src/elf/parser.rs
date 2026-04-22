@@ -1,7 +1,7 @@
 use object::read::ObjectSection;
 use object::{File, Object, SectionKind};
 
-use crate::bpf::instruction::BpfInsn;
+use crate::bpf::instruction::{BpfInsn, Opcode};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
@@ -54,11 +54,20 @@ pub fn parse_elf(data: &[u8]) -> Result<BpfObject, ParseError> {
         }
 
         let mut instructions = Vec::new();
-        for chunk in section_data.chunks_exact(8) {
-            let raw = u64::from_le_bytes(chunk.try_into().unwrap());
-            if let Some(insn) = BpfInsn::decode(raw) {
+        let chunks: Vec<&[u8]> = section_data.chunks_exact(8).collect();
+        let mut i = 0;
+        while i < chunks.len() {
+            let raw = u64::from_le_bytes(chunks[i].try_into().unwrap());
+            if let Some(mut insn) = BpfInsn::decode(raw) {
+                if insn.opcode == Opcode::LdImm64 && i + 1 < chunks.len() {
+                    let raw2 = u64::from_le_bytes(chunks[i + 1].try_into().unwrap());
+                    let high = i32::from_le_bytes(raw2.to_le_bytes()[4..8].try_into().unwrap());
+                    insn.imm64 = Some((insn.imm as u32 as u64) | ((high as u32 as u64) << 32));
+                    i += 1;
+                }
                 instructions.push(insn);
             }
+            i += 1;
         }
 
         programs.push(BpfProgram {
