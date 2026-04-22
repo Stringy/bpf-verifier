@@ -1,10 +1,12 @@
 module Verify_{{ program_name }}
 
 open FStar.Mul
+open FStar.Tactics.V2
 open BPF.State
 open BPF.Semantics
 open BPF.Spec
 open BPF.Verify
+open BPF.Tactic
 open {{ spec_module }}
 
 let program : bpf_program = [
@@ -23,10 +25,10 @@ open FStar.UInt64
 {%- endfor %}
 {%- endif %}
 
-#push-options "--fuel {{ fuel }} --ifuel 2 --z3rlimit {{ rlimit }}"
+#push-options "--z3rlimit 30"
 let proof : squash (program_satisfies program {{ spec_name }}) =
 {%- for i in 0..hints.len() %}
   FStar.Classical.forall_intro (FStar.Classical.move_requires bitwise_hint_{{ i }});
 {%- endfor %}
-  ()
+  _ by (bpf_auto [])
 #pop-options
