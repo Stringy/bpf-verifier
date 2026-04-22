@@ -14,7 +14,6 @@ module BPF.Helpers
 
 open FStar.UInt64
 open BPF.State
-open BPF.Semantics
 
 (* What kind of value the helper returns in r0.
    This determines how the safety checkers treat the return value:

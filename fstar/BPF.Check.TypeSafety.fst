@@ -44,6 +44,7 @@ module BPF.Check.TypeSafety
 open FStar.Mul
 open FStar.Int32
 open BPF.State
+open BPF.Helpers
 open BPF.Semantics
 
 (* --- Abstract type domain ---
@@ -221,26 +222,20 @@ let check_insn_ts (abs: abs_state_ts) (insn: bpf_insn) : option abs_state_ts =
   | BPF_JMP32_IMM _ _ _ _ -> Some abs
   | BPF_JMP_JA _ -> Some abs
 
-  (* --- BPF_CALL: clobber caller-saved registers ---
-     The BPF calling convention says r0-r5 are caller-saved.
-     After a helper call, we lose all type tracking on r0-r5.
-     r6-r9 are callee-saved and preserved.
-     r10 (frame pointer) is always preserved.
-
-     For MAP_LOOKUP_ELEM, r0 could be MapValuePtr or Null, but we
-     conservatively set it to TUnknown here -- the type safety layer
-     doesn't track null-check branching, so TUnknown is the safe
-     choice. Other checker layers handle null safety. *)
-  | BPF_CALL MAP_LOOKUP_ELEM ->
-    let abs1 = ts_set abs 0 TUnknown in
-    let abs2 = ts_set abs1 1 TUnknown in
-    let abs3 = ts_set abs2 2 TUnknown in
-    let abs4 = ts_set abs3 3 TUnknown in
-    let abs5 = ts_set abs4 4 TUnknown in
-    let abs6 = ts_set abs5 5 TUnknown in
-    Some abs6
-  | BPF_CALL _ ->
-    let abs1 = ts_set abs 0 TUnknown in
+  (* --- BPF_CALL: dispatch on helper ret_type for r0's abstract type ---
+     RetMapPtr -> TUnknown (could be map pointer or null)
+     RetScalar/RetErrorCode -> TScalar (plain integer)
+     Unknown helpers -> TUnknown (conservative)
+     r1-r5 are caller-saved and clobbered. r6-r9 preserved. *)
+  | BPF_CALL hid ->
+    let r0_type = (match get_helper_spec hid with
+      | Some spec ->
+        (match spec.ret_type with
+         | RetMapPtr -> TUnknown
+         | RetScalar -> TScalar
+         | RetErrorCode -> TScalar)
+      | None -> TUnknown) in
+    let abs1 = ts_set abs 0 r0_type in
     let abs2 = ts_set abs1 1 TUnknown in
     let abs3 = ts_set abs2 2 TUnknown in
     let abs4 = ts_set abs3 3 TUnknown in

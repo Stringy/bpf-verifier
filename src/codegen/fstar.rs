@@ -140,6 +140,7 @@ mod tests {
         assert!(output.contains("stack_bounds_tac"));
         assert!(output.contains("type_check program"));
         assert!(output.contains("type_check_tac"));
+        assert!(output.contains("open BPF.Helpers"));
         assert!(output.contains("program_satisfies program test_spec"));
     }
 }

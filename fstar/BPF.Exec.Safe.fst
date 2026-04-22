@@ -36,6 +36,7 @@ open FStar.UInt32
 open FStar.Int32
 open FStar.Int.Cast
 open BPF.State
+open BPF.Helpers
 open BPF.Semantics
 open BPF.Spec
 open BPF.Verify
@@ -251,28 +252,13 @@ let exec_insn_safe (st: bpf_state) (insn: bpf_insn) (ev: safety_evidence) : opti
      | None -> None)
   | BPF_JMP_JA offset ->
     Some { st with pc = st.pc + 1 + offset }
-  | BPF_CALL MAP_LOOKUP_ELEM ->
-    let id = st.next_map_id in
-    if ev.null_safe
-    then
-      (* Null safety verified -- pick the non-null path deterministically
-         and populate map_values so subsequent map_value_read succeeds.
-         The null safety check guarantees the programme handles both the
-         null and non-null cases, so the spec holds regardless.
-         We use 0uL as the map value -- the functional spec must not
-         depend on the specific value returned by map lookups. *)
-      Some { st with
-        regs = set_reg st.regs r0 (MapValuePtr id);
-        map_values = (id, 0uL) :: st.map_values;
-        pc = st.pc + 1;
-        next_map_id = id + 1 }
-    else
-      (* Original semantics -- no value added to map_values *)
-      Some { st with
-        regs = set_reg st.regs r0 (MapValuePtr id);
-        pc = st.pc + 1;
-        next_map_id = id + 1 }
-  | BPF_CALL _ -> None
+  (* BPF_CALL: dispatch through helper registry with safety evidence.
+     exec_helper_safe uses the null_safe flag to determine whether to
+     populate map_values for RetMapPtr helpers. *)
+  | BPF_CALL hid ->
+    (match get_helper_spec hid with
+     | Some spec -> exec_helper_safe st spec ev.null_safe
+     | None -> None)
   | BPF_EXIT -> Some st
 
 (* Execute a full programme with safety evidence.

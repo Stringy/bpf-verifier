@@ -25,6 +25,7 @@ open FStar.UInt32
 open FStar.Int32
 open FStar.Int.Cast
 open BPF.State
+open BPF.Helpers
 
 type alu_op =
   | ADD | SUB | MUL | DIV | OR | AND
@@ -36,16 +37,8 @@ type jmp_op =
   | JNE | JLT | JLE
   | JSGT | JSGE | JSLT | JSLE
 
-(* BPF helper function IDs. Each corresponds to a linux kernel helper.
-   The helper's semantics are defined in BPF.Helpers.get_helper_spec. *)
-type helper_id =
-  | MAP_LOOKUP_ELEM    (* helper #1 -- look up a key in a BPF map *)
-  | MAP_UPDATE_ELEM    (* helper #2 -- insert or update a key-value pair *)
-  | MAP_DELETE_ELEM    (* helper #3 -- delete a key from a BPF map *)
-  | PROBE_READ         (* helper #4 -- safely read from kernel memory *)
-  | KTIME_GET_NS       (* helper #5 -- get current time in nanoseconds *)
-  | GET_PRANDOM_U32    (* helper #7 -- get a pseudo-random 32-bit number *)
-  | UNKNOWN_HELPER : nat -> helper_id
+(* helper_id is defined in BPF.State to avoid circular dependencies
+   with BPF.Helpers. See BPF.State.fst for the constructors. *)
 
 type bpf_insn =
   | BPF_ALU64_REG : alu_op -> reg_idx -> reg_idx -> bpf_insn
@@ -177,10 +170,9 @@ let reg_val_is_zero (v: reg_val) : option bool =
    - MapValuePtr -> read from map value memory
    - Scalar/Null -> UB (invalid pointer dereference)
 
-   BPF_CALL for MAP_LOOKUP_ELEM: r0 gets either MapValuePtr (found) or
-   Null (not found). The choice is non-deterministic — the verifier must
-   prove the spec holds in both cases. We model this by giving back a
-   fresh MapValuePtr; the programme must null-check before use. *)
+   BPF_CALL: dispatches through the helper registry in BPF.Helpers.
+   Each helper's behaviour is described by a helper_spec. Unknown
+   helpers are treated as undefined behaviour (None). *)
 let exec_insn (st: bpf_state) (insn: bpf_insn) : option bpf_state =
   match insn with
   | BPF_ALU64_REG op dst src ->
@@ -328,21 +320,13 @@ let exec_insn (st: bpf_state) (insn: bpf_insn) : option bpf_state =
      | None -> None)
   | BPF_JMP_JA offset ->
     Some { st with pc = st.pc + 1 + offset }
-  (* BPF_CALL: helper function call.
-     MAP_LOOKUP_ELEM: r1 = map, r2 = key pointer. Returns a MapValuePtr
-     or Null in r0. We allocate a fresh map ID and associate it with a
-     symbolic value. The programme must branch on r0 before dereferencing.
-
-     The map value is added to map_values so that a subsequent LDX through
-     the MapValuePtr can read it. The value is unconstrained — the spec
-     cannot assume any particular map contents. *)
-  | BPF_CALL MAP_LOOKUP_ELEM ->
-    let id = st.next_map_id in
-    Some { st with
-      regs = set_reg st.regs r0 (MapValuePtr id);
-      pc = st.pc + 1;
-      next_map_id = id + 1 }
-  | BPF_CALL _ -> None
+  (* BPF_CALL: dispatch through the helper registry.
+     Known helpers are executed via exec_helper from BPF.Helpers.
+     Unknown helpers are treated as undefined behaviour (None). *)
+  | BPF_CALL hid ->
+    (match get_helper_spec hid with
+     | Some spec -> exec_helper st spec
+     | None -> None)
   | BPF_EXIT -> Some st
 
 (* Drop the first `n` elements of a list. *)

@@ -161,3 +161,16 @@ let stack_load (st: bpf_state) (offset: int) (w: mem_width) : option UInt64.t =
 let stack_store (st: bpf_state) (offset: int) (w: mem_width) (v: UInt64.t) : option bpf_state =
   if not (stack_offset_valid offset w) then None
   else Some { st with stack = stack_write st.stack offset w v; pc = st.pc + 1 }
+
+(* --- BPF helper function IDs ---
+   Defined here (rather than in BPF.Semantics) so that BPF.Helpers can
+   reference them without creating a circular dependency.
+   Each corresponds to a linux kernel BPF helper function. *)
+type helper_id =
+  | MAP_LOOKUP_ELEM    (* helper #1 -- look up a key in a BPF map *)
+  | MAP_UPDATE_ELEM    (* helper #2 -- insert or update a key-value pair *)
+  | MAP_DELETE_ELEM    (* helper #3 -- delete a key from a BPF map *)
+  | PROBE_READ         (* helper #4 -- safely read from kernel memory *)
+  | KTIME_GET_NS       (* helper #5 -- get current time in nanoseconds *)
+  | GET_PRANDOM_U32    (* helper #7 -- get a pseudo-random 32-bit number *)
+  | UNKNOWN_HELPER : nat -> helper_id

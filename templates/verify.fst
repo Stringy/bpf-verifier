@@ -4,6 +4,7 @@ open FStar.Mul
 open FStar.Tactics.V2
 open BPF.State
 open BPF.Semantics
+open BPF.Helpers
 open BPF.Spec
 open BPF.Verify
 open BPF.Tactic

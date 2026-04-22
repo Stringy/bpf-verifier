@@ -381,6 +381,11 @@ impl BpfInsn {
             Opcode::Call => {
                 let helper = match self.imm {
                     1 => "MAP_LOOKUP_ELEM".to_string(),
+                    2 => "MAP_UPDATE_ELEM".to_string(),
+                    3 => "MAP_DELETE_ELEM".to_string(),
+                    4 => "PROBE_READ".to_string(),
+                    5 => "KTIME_GET_NS".to_string(),
+                    7 => "GET_PRANDOM_U32".to_string(),
                     id => format!("(UNKNOWN_HELPER {})", id),
                 };
                 format!("BPF_CALL {helper}")

@@ -43,6 +43,7 @@ module BPF.Check.NullSafety
 open FStar.Mul
 open FStar.Int32
 open BPF.State
+open BPF.Helpers
 open BPF.Semantics
 
 (* --- Abstract null-status domain ---
@@ -308,24 +309,20 @@ let check_insn_ns (abs: abs_state_ns) (insn: bpf_insn) (pc: int) (targets: branc
      jumps -- branch targets handle the merge). *)
   | BPF_JMP_JA _ -> Some (abs, targets)
 
-  (* --- BPF_CALL: helper function call ---
-     MAP_LOOKUP_ELEM returns a possibly-null map pointer in r0.
-     Mark r0 as Unchecked (must null-check before dereference).
-     r1-r5 are caller-saved and get clobbered -- set to NotMap.
-     r6-r9 are callee-saved and preserve their null status.
-     r10 (frame pointer) is always preserved. *)
-  | BPF_CALL MAP_LOOKUP_ELEM ->
-    let abs1 = ns_set abs 0 Unchecked in
-    let abs2 = ns_set abs1 1 NotMap in
-    let abs3 = ns_set abs2 2 NotMap in
-    let abs4 = ns_set abs3 3 NotMap in
-    let abs5 = ns_set abs4 4 NotMap in
-    let abs6 = ns_set abs5 5 NotMap in
-    Some (abs6, targets)
-  (* Other helpers: we don't know what they return, so assume
-     the result is not a map pointer. Clobber r0-r5. *)
-  | BPF_CALL _ ->
-    let abs1 = ns_set abs 0 NotMap in
+  (* --- BPF_CALL: dispatch on helper ret_type for r0's null status ---
+     RetMapPtr -> Unchecked (must null-check before dereference)
+     RetScalar/RetErrorCode -> NotMap (not a map pointer)
+     Unknown helpers -> NotMap (conservative)
+     r1-r5 are caller-saved and clobbered. r6-r9 preserved. *)
+  | BPF_CALL hid ->
+    let r0_status = (match get_helper_spec hid with
+      | Some spec ->
+        (match spec.ret_type with
+         | RetMapPtr -> Unchecked
+         | RetScalar -> NotMap
+         | RetErrorCode -> NotMap)
+      | None -> NotMap) in
+    let abs1 = ns_set abs 0 r0_status in
     let abs2 = ns_set abs1 1 NotMap in
     let abs3 = ns_set abs2 2 NotMap in
     let abs4 = ns_set abs3 3 NotMap in
