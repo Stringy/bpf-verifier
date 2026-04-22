@@ -7,6 +7,8 @@ open BPF.Semantics
 open BPF.Spec
 open BPF.Verify
 open BPF.Tactic
+open BPF.Check.StackBounds
+open BPF.Tactic.Layered
 open {{ spec_module }}
 
 let program : bpf_program = [
@@ -25,6 +27,13 @@ open FStar.UInt64
 {%- endfor %}
 {%- endif %}
 
+(* Stack bounds safety — verified by abstract interpretation *)
+#push-options "--z3rlimit 60"
+let sb_proof : squash (stack_bounds_check program = true) =
+  _ by (stack_bounds_tac ())
+#pop-options
+
+(* Functional correctness *)
 #push-options "--z3rlimit 60"
 let proof : squash (program_satisfies program {{ spec_name }}) =
 {%- for i in 0..hints.len() %}
