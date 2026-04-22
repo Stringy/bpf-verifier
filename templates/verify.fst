@@ -25,10 +25,10 @@ open FStar.UInt64
 {%- endfor %}
 {%- endif %}
 
-#push-options "--z3rlimit 30"
+#push-options "--z3rlimit 60"
 let proof : squash (program_satisfies program {{ spec_name }}) =
 {%- for i in 0..hints.len() %}
   FStar.Classical.forall_intro (FStar.Classical.move_requires bitwise_hint_{{ i }});
 {%- endfor %}
-  _ by (bpf_auto [])
+  _ by (bpf_auto_{% if has_map_calls %}map{% else %}pure{% endif %} ())
 #pop-options
