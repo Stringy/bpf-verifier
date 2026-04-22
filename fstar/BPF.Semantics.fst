@@ -49,24 +49,20 @@ let alu64 (op: alu_op) (dst_val src_val: UInt64.t) : option UInt64.t =
 let alu32 (op: alu_op) (dst_val src_val: UInt64.t) : option UInt64.t =
   let d32 = UInt32.uint_to_t (UInt64.v dst_val % pow2 32) in
   let s32 = UInt32.uint_to_t (UInt64.v src_val % pow2 32) in
-  let result_32 : option UInt32.t = match op with
-    | ADD -> Some (UInt32.add_mod d32 s32)
-    | SUB -> Some (UInt32.sub_mod d32 s32)
-    | MUL -> Some (UInt32.mul_mod d32 s32)
-    | DIV -> if s32 = 0ul then None else Some (UInt32.div d32 s32)
-    | OR  -> Some (UInt32.logor d32 s32)
-    | AND -> Some (UInt32.logand d32 s32)
-    | XOR -> Some (UInt32.logxor d32 s32)
-    | MOV -> Some s32
-    | NEG -> Some (UInt32.sub_mod 0ul d32)
-    | MOD -> if s32 = 0ul then None else Some (UInt32.rem d32 s32)
-    | LSH -> Some (UInt32.shift_left d32 (UInt32.uint_to_t (UInt32.v s32 % 32)))
-    | RSH -> Some (UInt32.shift_right d32 (UInt32.uint_to_t (UInt32.v s32 % 32)))
-    | ARSH -> Some (UInt32.shift_right d32 (UInt32.uint_to_t (UInt32.v s32 % 32)))
-  in
-  match result_32 with
-  | None -> None
-  | Some r -> Some (UInt64.uint_to_t (UInt32.v r))
+  match op with
+  | ADD -> Some (UInt64.uint_to_t (UInt32.v (UInt32.add_mod d32 s32)))
+  | SUB -> Some (UInt64.uint_to_t (UInt32.v (UInt32.sub_mod d32 s32)))
+  | MUL -> Some (UInt64.uint_to_t (UInt32.v (UInt32.mul_mod d32 s32)))
+  | DIV -> if s32 = 0ul then None else Some (UInt64.uint_to_t (UInt32.v (UInt32.div d32 s32)))
+  | OR  -> Some (UInt64.uint_to_t (UInt32.v (UInt32.logor d32 s32)))
+  | AND -> Some (UInt64.uint_to_t (UInt32.v (UInt32.logand d32 s32)))
+  | XOR -> Some (UInt64.uint_to_t (UInt32.v (UInt32.logxor d32 s32)))
+  | MOV -> Some (UInt64.uint_to_t (UInt32.v s32))
+  | NEG -> Some (UInt64.uint_to_t (UInt32.v (UInt32.sub_mod 0ul d32)))
+  | MOD -> if s32 = 0ul then None else Some (UInt64.uint_to_t (UInt32.v (UInt32.rem d32 s32)))
+  | LSH -> Some (UInt64.uint_to_t (UInt32.v (UInt32.shift_left d32 (UInt32.uint_to_t (UInt32.v s32 % 32)))))
+  | RSH -> Some (UInt64.uint_to_t (UInt32.v (UInt32.shift_right d32 (UInt32.uint_to_t (UInt32.v s32 % 32)))))
+  | ARSH -> Some (UInt64.uint_to_t (UInt32.v (UInt32.shift_right d32 (UInt32.uint_to_t (UInt32.v s32 % 32)))))
 
 let compute_offset (base_val: UInt64.t) (off: Int32.t) : int =
   UInt64.v base_val + sign_extend_to_int off
