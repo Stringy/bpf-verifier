@@ -364,19 +364,19 @@ impl BpfInsn {
                 format!("BPF_ST {} {} ({}l) ({}l)", w, self.dst, self.offset, self.imm)
             }
             Opcode::Jmp64(op, Source::Reg) => {
-                format!("BPF_JMP64_REG {} {} {} {}", op, self.dst, self.src, self.offset)
+                format!("BPF_JMP64_REG {} {} {} ({})", op, self.dst, self.src, self.offset)
             }
             Opcode::Jmp64(op, Source::Imm) => {
-                format!("BPF_JMP64_IMM {} {} ({}l) {}", op, self.dst, self.imm, self.offset)
+                format!("BPF_JMP64_IMM {} {} ({}l) ({})", op, self.dst, self.imm, self.offset)
             }
             Opcode::Jmp32(op, Source::Reg) => {
-                format!("BPF_JMP32_REG {} {} {} {}", op, self.dst, self.src, self.offset)
+                format!("BPF_JMP32_REG {} {} {} ({})", op, self.dst, self.src, self.offset)
             }
             Opcode::Jmp32(op, Source::Imm) => {
-                format!("BPF_JMP32_IMM {} {} ({}l) {}", op, self.dst, self.imm, self.offset)
+                format!("BPF_JMP32_IMM {} {} ({}l) ({})", op, self.dst, self.imm, self.offset)
             }
             Opcode::JmpJa => {
-                format!("BPF_JMP_JA {}", self.offset)
+                format!("BPF_JMP_JA ({})", self.offset)
             }
             Opcode::Call => {
                 let helper = match self.imm {

@@ -90,6 +90,7 @@ fn run_verify(
         }
     };
     let program_name = &prog.section_name;
+    let safe_name = program_name.replace('/', "_");
 
     // 3. Determine spec module — user-provided or default crash safety
     let (spec_module, spec_name) = if let Some(path) = spec_path {
@@ -103,7 +104,7 @@ fn run_verify(
     };
 
     // 4. Generate F* source
-    let fstar_source = generate_fstar(program_name, &prog.instructions, spec_module, spec_name);
+    let fstar_source = generate_fstar(&safe_name, &prog.instructions, spec_module, spec_name);
 
     if verbose {
         eprintln!("--- Generated F* source ---");
@@ -120,7 +121,7 @@ fn run_verify(
         }
     };
 
-    let fst_filename = format!("Verify_{program_name}.fst");
+    let fst_filename = format!("Verify_{safe_name}.fst");
     let fst_path = tmp_dir.path().join(&fst_filename);
     if let Err(e) = std::fs::write(&fst_path, &fstar_source) {
         eprintln!("error: failed to write generated F* file: {e}");
