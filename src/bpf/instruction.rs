@@ -165,6 +165,55 @@ impl std::fmt::Display for MemWidth {
     }
 }
 
+/// Jump comparison operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JmpOp {
+    Ja,
+    Jeq, Jgt, Jge, Jset,
+    Jne, Jlt, Jle,
+    Jsgt, Jsge, Jslt, Jsle,
+}
+
+impl JmpOp {
+    fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0x00 => Some(JmpOp::Ja),
+            0x01 => Some(JmpOp::Jeq),
+            0x02 => Some(JmpOp::Jgt),
+            0x03 => Some(JmpOp::Jge),
+            0x04 => Some(JmpOp::Jset),
+            0x05 => Some(JmpOp::Jne),
+            0x06 => Some(JmpOp::Jsgt),
+            0x07 => Some(JmpOp::Jsge),
+            0x0a => Some(JmpOp::Jlt),
+            0x0b => Some(JmpOp::Jle),
+            0x0c => Some(JmpOp::Jslt),
+            0x0d => Some(JmpOp::Jsle),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for JmpOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            JmpOp::Ja => "JA",
+            JmpOp::Jeq => "JEQ",
+            JmpOp::Jgt => "JGT",
+            JmpOp::Jge => "JGE",
+            JmpOp::Jset => "JSET",
+            JmpOp::Jne => "JNE",
+            JmpOp::Jlt => "JLT",
+            JmpOp::Jle => "JLE",
+            JmpOp::Jsgt => "JSGT",
+            JmpOp::Jsge => "JSGE",
+            JmpOp::Jslt => "JSLT",
+            JmpOp::Jsle => "JSLE",
+        };
+        write!(f, "{s}")
+    }
+}
+
 /// Decoded BPF opcode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opcode {
@@ -173,6 +222,9 @@ pub enum Opcode {
     Ldx(MemWidth),
     Stx(MemWidth),
     St(MemWidth),
+    Jmp64(JmpOp, Source),
+    Jmp32(JmpOp, Source),
+    JmpJa,
     Exit,
     Unknown(u8),
 }
@@ -218,6 +270,22 @@ impl Opcode {
             },
             0x03 => match MemWidth::from_size_bits(size_bits) {
                 Some(w) => Opcode::Stx(w),
+                None => Opcode::Unknown(raw),
+            },
+            // JMP class (64-bit): op 0x00 = JA (unconditional), 0x09 = EXIT (handled above)
+            0x05 => {
+                if op_nibble == 0x00 {
+                    Opcode::JmpJa
+                } else {
+                    match JmpOp::from_u8(op_nibble) {
+                        Some(op) => Opcode::Jmp64(op, source),
+                        None => Opcode::Unknown(raw),
+                    }
+                }
+            }
+            // JMP32 class (32-bit comparisons)
+            0x06 => match JmpOp::from_u8(op_nibble) {
+                Some(op) => Opcode::Jmp32(op, source),
                 None => Opcode::Unknown(raw),
             },
             _ => Opcode::Unknown(raw),
@@ -284,6 +352,21 @@ impl BpfInsn {
             }
             Opcode::St(w) => {
                 format!("BPF_ST {} {} ({}l) ({}l)", w, self.dst, self.offset, self.imm)
+            }
+            Opcode::Jmp64(op, Source::Reg) => {
+                format!("BPF_JMP64_REG {} {} {} {}", op, self.dst, self.src, self.offset)
+            }
+            Opcode::Jmp64(op, Source::Imm) => {
+                format!("BPF_JMP64_IMM {} {} ({}l) {}", op, self.dst, self.imm, self.offset)
+            }
+            Opcode::Jmp32(op, Source::Reg) => {
+                format!("BPF_JMP32_REG {} {} {} {}", op, self.dst, self.src, self.offset)
+            }
+            Opcode::Jmp32(op, Source::Imm) => {
+                format!("BPF_JMP32_IMM {} {} ({}l) {}", op, self.dst, self.imm, self.offset)
+            }
+            Opcode::JmpJa => {
+                format!("BPF_JMP_JA {}", self.offset)
             }
             Opcode::Exit => "BPF_EXIT".to_string(),
             Opcode::Unknown(raw) => format!("BPF_UNKNOWN 0x{:02x}", raw),

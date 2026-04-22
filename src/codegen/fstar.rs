@@ -13,6 +13,7 @@ struct VerifyModule {
     spec_name: String,
     instructions: Vec<String>,
     hints: Vec<String>,
+    fuel: usize,
 }
 
 pub fn generate_fstar(
@@ -22,12 +23,14 @@ pub fn generate_fstar(
     spec_name: &str,
 ) -> String {
     let hints = generate_bitwise_hints(instructions);
+    let fuel = instructions.len() * 2;
     let tmpl = VerifyModule {
         program_name: program_name.to_string(),
         spec_module: spec_module.to_string(),
         spec_name: spec_name.to_string(),
         instructions: instructions.iter().map(|i| i.to_fstar()).collect(),
         hints,
+        fuel,
     };
     tmpl.render().expect("failed to render F* template")
 }

@@ -119,10 +119,12 @@ let stack_write (stack: stack_mem) (offset: int) (w: mem_width) (v: UInt64.t) : 
 (* --- Machine state ---
    `noeq` tells F* not to derive decidable equality for this type.
    We don't need == on states, and deriving it for sequences is expensive. *)
+(* `pc` is int (not nat) because branch offsets can temporarily produce
+   negative values. exec_program checks pc >= 0 before indexing. *)
 noeq
 type bpf_state = {
   regs: reg_file;
-  pc: nat;
+  pc: int;
   stack: stack_mem;
 }
 
