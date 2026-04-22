@@ -54,20 +54,17 @@ pub fn parse_elf(data: &[u8]) -> Result<BpfObject, ParseError> {
         }
 
         let mut instructions = Vec::new();
-        let chunks: Vec<&[u8]> = section_data.chunks_exact(8).collect();
-        let mut i = 0;
-        while i < chunks.len() {
-            let raw = u64::from_le_bytes(chunks[i].try_into().unwrap());
+        let mut chunks = section_data.chunks_exact(8);
+        while let Some(chunk) = chunks.next() {
+            let raw = u64::from_le_bytes(chunk.try_into().expect("chunks_exact(8) guarantees 8 bytes"));
             if let Some(mut insn) = BpfInsn::decode(raw) {
-                if insn.opcode == Opcode::LdImm64 && i + 1 < chunks.len() {
-                    let raw2 = u64::from_le_bytes(chunks[i + 1].try_into().unwrap());
-                    let high = i32::from_le_bytes(raw2.to_le_bytes()[4..8].try_into().unwrap());
+                if insn.opcode == Opcode::LdImm64 && let Some(next_chunk) = chunks.next() {
+                    let raw2 = u64::from_le_bytes(next_chunk.try_into().expect("chunks_exact(8) guarantees 8 bytes"));
+                    let high = i32::from_le_bytes(raw2.to_le_bytes()[4..8].try_into().expect("4-byte slice"));
                     insn.imm64 = Some((insn.imm as u32 as u64) | ((high as u32 as u64) << 32));
-                    i += 1;
                 }
                 instructions.push(insn);
             }
-            i += 1;
         }
 
         programs.push(BpfProgram {

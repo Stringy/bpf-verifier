@@ -11,9 +11,6 @@ pub enum VerifyError {
 
     #[error("verification failed: {0}")]
     VerificationFailed(String),
-
-    #[error("unexpected output from F*: {0}")]
-    UnexpectedOutput(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -23,7 +20,7 @@ pub enum VerifyResult {
 }
 
 pub struct FstarRunner {
-    pub fstar_path: PathBuf,
+    fstar_path: PathBuf,
     include_dirs: Vec<PathBuf>,
 }
 
@@ -37,14 +34,14 @@ impl FstarRunner {
 
     /// Look for the F* binary relative to the project root, falling back to
     /// a PATH lookup via `which`.
-    pub fn find_fstar(project_root: &Path) -> Result<Self, VerifyError> {
+    pub fn find_fstar(project_root: &Path, include_dirs: Vec<PathBuf>) -> Result<Self, VerifyError> {
         let local = project_root.join("third_party/fstar/bin/fstar.exe");
         if local.is_file() {
-            return Ok(Self::new(local, Vec::new()));
+            return Ok(Self::new(local, include_dirs));
         }
 
         if let Some(path) = which_fstar() {
-            return Ok(Self::new(path, Vec::new()));
+            return Ok(Self::new(path, include_dirs));
         }
 
         Err(VerifyError::FstarNotFound(local))

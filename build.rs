@@ -32,13 +32,15 @@ fn compile_corpus(corpus_dir: &Path, out_dir: &Path) {
         }
 
         let target_dir = out_dir.join(entry);
-        fs::create_dir_all(&target_dir).unwrap();
+        fs::create_dir_all(&target_dir).expect("failed to create corpus output directory");
 
-        for file in fs::read_dir(&dir).unwrap() {
-            let file = file.unwrap();
+        for file in fs::read_dir(&dir).expect("failed to read corpus directory") {
+            let file = file.expect("failed to read directory entry");
             let path = file.path();
             if path.extension().and_then(|e| e.to_str()) == Some("c") {
-                let stem = path.file_stem().unwrap().to_str().unwrap();
+                let stem = path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .expect("corpus file must have a valid UTF-8 stem");
                 let out_file = target_dir.join(format!("{stem}.o"));
                 compile_bpf(&path, &out_file);
                 println!("cargo::rerun-if-changed={}", path.display());
@@ -48,7 +50,7 @@ fn compile_corpus(corpus_dir: &Path, out_dir: &Path) {
 }
 
 fn main() {
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap()).join("corpus");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set")).join("corpus");
     let corpus_dir = PathBuf::from("tests/corpus");
 
     if corpus_dir.exists() {

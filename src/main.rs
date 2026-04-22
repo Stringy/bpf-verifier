@@ -81,8 +81,14 @@ fn run_verify(
         }
     };
 
-    // 2. Take the first program section (Milestone A)
-    let prog = &bpf_object.programs[0];
+    // 2. Take the first program section
+    let prog = match bpf_object.programs.first() {
+        Some(p) => p,
+        None => {
+            eprintln!("error: no program sections in {}", program_path.display());
+            return 2;
+        }
+    };
     let program_name = &prog.section_name;
 
     let spec_module = spec_path
@@ -129,12 +135,13 @@ fn run_verify(
         return 2;
     }
 
-    // 7. Find F* binary
+    // 7. Find F* binary and set up include dirs
     let root = project_root();
-    let mut runner = if let Some(override_path) = fstar_path_override {
-        FstarRunner::new(override_path.to_path_buf(), Vec::new())
+    let include_dirs = vec![root.join("fstar"), tmp_dir.path().to_path_buf()];
+    let runner = if let Some(override_path) = fstar_path_override {
+        FstarRunner::new(override_path.to_path_buf(), include_dirs)
     } else {
-        match FstarRunner::find_fstar(&root) {
+        match FstarRunner::find_fstar(&root, include_dirs) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("error: {e}");
@@ -142,13 +149,6 @@ fn run_verify(
             }
         }
     };
-
-    // 8. Set up include dirs: [project_root/fstar, temp_dir]
-    let fstar_lib_dir = root.join("fstar");
-    runner = FstarRunner::new(
-        runner.fstar_path.clone(),
-        vec![fstar_lib_dir, tmp_dir.path().to_path_buf()],
-    );
 
     // 9. Run verification
     match runner.verify(&fst_path) {
