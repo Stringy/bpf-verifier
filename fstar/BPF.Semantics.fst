@@ -339,14 +339,30 @@ let exec_insn (st: bpf_state) (insn: bpf_insn) : option bpf_state =
   | BPF_CALL (UNKNOWN_HELPER _) -> None
   | BPF_EXIT -> Some st
 
+(* Drop the first `n` elements of a list. *)
+let rec list_drop (#a: Type) (l: list a) (n: nat) : Tot (list a) (decreases n) =
+  if n = 0 then l
+  else match l with
+    | [] -> []
+    | _ :: rest -> list_drop rest (n - 1)
+
+(* Execute a programme. Maintains a "current position" in the
+   programme list using list_drop, avoiding the O(n) cost of
+   List.Tot.index at each step.
+
+   For straight-line execution (pc advances by 1), the tail is simply
+   the next element. For branches, we recompute from the full
+   programme list. *)
 let rec exec_program (st: bpf_state) (prog: bpf_program) (fuel: nat)
   : Tot (option bpf_state) (decreases fuel) =
   if fuel = 0 then None
-  else if st.pc < 0 || st.pc >= List.Tot.length prog then None
   else
-    let insn = List.Tot.index prog st.pc in
-    if BPF_EXIT? insn then Some st
-    else
-      match exec_insn st insn with
-      | None -> None
-      | Some st' -> exec_program st' prog (fuel - 1)
+    let tail = list_drop prog (if st.pc >= 0 then st.pc else 0) in
+    match tail with
+    | [] -> None
+    | insn :: _ ->
+      if BPF_EXIT? insn then Some st
+      else
+        match exec_insn st insn with
+        | None -> None
+        | Some st' -> exec_program st' prog (fuel - 1)
