@@ -10,6 +10,10 @@ impl BasicBlock {
     pub fn len(&self) -> usize {
         self.end - self.start
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
 }
 
 pub fn find_basic_blocks(instructions: &[BpfInsn]) -> Vec<BasicBlock> {
@@ -44,8 +48,8 @@ pub fn find_basic_blocks(instructions: &[BpfInsn]) -> Vec<BasicBlock> {
     let mut blocks = Vec::new();
     let mut start = 0;
 
-    for i in 1..instructions.len() {
-        if leaders[i] {
+    for (i, &is_leader) in leaders.iter().enumerate().skip(1) {
+        if is_leader {
             blocks.push(BasicBlock { start, end: i });
             start = i;
         }

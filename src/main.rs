@@ -91,7 +91,7 @@ fn run_verify(
         .unwrap_or("Spec");
 
     // 4. Generate F* source
-    let fstar_source = generate_fstar(program_name, &prog.instructions, &spec_module, "spec");
+    let fstar_source = generate_fstar(program_name, &prog.instructions, spec_module, "spec");
 
     if verbose {
         eprintln!("--- Generated F* source ---");
