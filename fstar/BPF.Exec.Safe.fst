@@ -298,3 +298,33 @@ let program_satisfies_safe (prog: bpf_program) (spec: bpf_spec) (ev: safety_evid
      match exec_program_safe init_st prog (List.Tot.length prog) ev with
      | Some final_st -> spec_post spec final_st
      | None -> True)
+
+(* --- Phase 1 reconnection strategy ---
+
+   In Phase 1 we do NOT yet have a formal lemma proving that
+   exec_program_safe refines exec_program. Instead the generated
+   template emits two independent proofs:
+
+   1. stack_bounds_check programme = true   (via stack_bounds_tac)
+   2. program_satisfies programme spec      (via bpf_auto_pure/map)
+
+   The stack bounds proof is an additive safety guarantee -- it
+   certifies a property independently of the functional spec. The
+   functional proof still uses the original program_satisfies (not
+   program_satisfies_safe) so correctness is unchanged.
+
+   A formal reconnection lemma (layered_sound) will be added in
+   Phase 3 when all three safety layers are in place:
+
+     val layered_sound : prog:bpf_program -> spec:bpf_spec ->
+       ev:safety_evidence ->
+       Lemma (requires
+                (ev.stack_safe ==> stack_bounds_check prog) /\
+                (ev.type_safe  ==> type_check prog) /\
+                (ev.null_safe  ==> null_check prog) /\
+                program_satisfies_safe prog spec ev)
+             (ensures program_satisfies prog spec)
+
+   At that point the generated template will switch to proving
+   program_satisfies_safe with evidence_all, then applying
+   layered_sound to recover program_satisfies. *)
