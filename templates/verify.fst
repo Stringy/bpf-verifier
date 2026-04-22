@@ -23,7 +23,7 @@ open FStar.UInt64
 {%- endfor %}
 {%- endif %}
 
-#push-options "--fuel {{ fuel }} --ifuel 2 --z3rlimit 60"
+#push-options "--fuel {{ fuel }} --ifuel 2 --z3rlimit {{ rlimit }}"
 let proof : squash (program_satisfies program {{ spec_name }}) =
 {%- for i in 0..hints.len() %}
   FStar.Classical.forall_intro (FStar.Classical.move_requires bitwise_hint_{{ i }});

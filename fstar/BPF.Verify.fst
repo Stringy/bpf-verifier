@@ -37,6 +37,16 @@ let program_satisfies (prog: bpf_program) (spec: bpf_spec) : prop =
      | Some final_st -> spec_post spec final_st
      | None -> True)
 
+(* Chunked verification: the exec function is provided by the generated
+   code (which chains exec_chunk calls). Same contract as program_satisfies
+   but the execution strategy is delegated to the caller. *)
+let program_satisfies_chunked (exec_fn: bpf_state -> option bpf_state) (spec: bpf_spec) : prop =
+  forall (init: bpf_state).
+    spec_pre spec init ==>
+    (match exec_fn init with
+     | Some final_st -> spec_post spec final_st
+     | None -> True)
+
 (* --- CO-RE relocation stubs ---
    Placeholder types for Milestone E. Currently trivial (no relocations). *)
 type layout_constraints = unit

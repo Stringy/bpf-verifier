@@ -346,6 +346,23 @@ let rec list_drop (#a: Type) (l: list a) (n: nat) : Tot (list a) (decreases n) =
     | [] -> []
     | _ :: rest -> list_drop rest (n - 1)
 
+(* Execute up to `count` instructions starting from the current pc.
+   Used for chunked execution: verify a small batch of instructions
+   at a time, keeping each proof obligation small. *)
+let rec exec_chunk (st: bpf_state) (prog: bpf_program) (count: nat)
+  : Tot (option bpf_state) (decreases count) =
+  if count = 0 then Some st
+  else
+    let tail = list_drop prog (if st.pc >= 0 then st.pc else 0) in
+    match tail with
+    | [] -> None
+    | insn :: _ ->
+      if BPF_EXIT? insn then Some st
+      else
+        match exec_insn st insn with
+        | None -> None
+        | Some st' -> exec_chunk st' prog (count - 1)
+
 (* Execute a programme. Maintains a "current position" in the
    programme list using list_drop, avoiding the O(n) cost of
    List.Tot.index at each step.

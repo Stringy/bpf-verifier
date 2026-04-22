@@ -14,6 +14,9 @@ struct VerifyModule {
     instructions: Vec<String>,
     hints: Vec<String>,
     fuel: usize,
+    rlimit: usize,
+    num_chunks: usize,
+    chunk_size: usize,
 }
 
 pub fn generate_fstar(
@@ -23,7 +26,10 @@ pub fn generate_fstar(
     spec_name: &str,
 ) -> String {
     let hints = generate_bitwise_hints(instructions);
-    let fuel = instructions.len() * 2;
+    let chunk_size = 8;
+    let num_chunks = (instructions.len() + chunk_size - 1) / chunk_size;
+    let fuel = chunk_size * 2 + 4;
+    let rlimit = 60;
     let tmpl = VerifyModule {
         program_name: program_name.to_string(),
         spec_module: spec_module.to_string(),
@@ -31,6 +37,9 @@ pub fn generate_fstar(
         instructions: instructions.iter().map(|i| i.to_fstar()).collect(),
         hints,
         fuel,
+        rlimit,
+        num_chunks,
+        chunk_size,
     };
     tmpl.render().expect("failed to render F* template")
 }
