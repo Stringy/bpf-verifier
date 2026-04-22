@@ -8,6 +8,7 @@ open BPF.Spec
 open BPF.Verify
 open BPF.Tactic
 open BPF.Check.StackBounds
+open BPF.Check.TypeSafety
 open BPF.Tactic.Layered
 open {{ spec_module }}
 
@@ -31,6 +32,12 @@ open FStar.UInt64
 #push-options "--z3rlimit 60"
 let sb_proof : squash (stack_bounds_check program = true) =
   _ by (stack_bounds_tac ())
+#pop-options
+
+(* Type safety — verified by abstract interpretation *)
+#push-options "--z3rlimit 60"
+let ts_proof : squash (type_check program = true) =
+  _ by (type_check_tac ())
 #pop-options
 
 (* Functional correctness *)

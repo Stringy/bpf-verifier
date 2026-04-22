@@ -129,6 +129,7 @@ mod tests {
         assert!(output.contains("open BPF.Spec"));
         assert!(output.contains("open BPF.Verify"));
         assert!(output.contains("open BPF.Check.StackBounds"));
+        assert!(output.contains("open BPF.Check.TypeSafety"));
         assert!(output.contains("open BPF.Tactic.Layered"));
         assert!(output.contains("open TestSpec"));
         assert!(output.contains("BPF_ALU64_REG MOV r0 r1"));
@@ -136,6 +137,8 @@ mod tests {
         assert!(output.contains("BPF_EXIT"));
         assert!(output.contains("stack_bounds_check program"));
         assert!(output.contains("stack_bounds_tac"));
+        assert!(output.contains("type_check program"));
+        assert!(output.contains("type_check_tac"));
         assert!(output.contains("program_satisfies program test_spec"));
     }
 }

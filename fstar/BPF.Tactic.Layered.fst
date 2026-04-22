@@ -26,6 +26,7 @@ open BPF.Semantics
 open BPF.Spec
 open BPF.Verify
 open BPF.Check.StackBounds
+open BPF.Check.TypeSafety
 open BPF.Exec.Safe
 
 (*
@@ -47,6 +48,30 @@ open BPF.Exec.Safe
    Use this tactic when you need to prove stack_safe evidence for a programme.
 *)
 let stack_bounds_tac () : Tac unit =
+  norm [delta; iota; zeta; primops];
+  trivial ()
+
+(*
+   Prove that a concrete programme passes type_check.
+
+   How it works:
+   - type_check is a decidable boolean function that performs abstract
+     interpretation to verify type safety of register operations
+   - For a concrete programme (known instruction list), normalisation
+     evaluates the type checker step-by-step to either true or false
+   - norm [delta; iota; zeta; primops] performs full normalisation:
+     * delta: unfold all definitions
+     * iota: reduce pattern matches
+     * zeta: reduce let bindings
+     * primops: evaluate primitive operations (arithmetic, comparisons)
+   - After normalisation, the goal becomes `true == true`, which trivial()
+     discharges immediately without invoking Z3
+
+   Use this tactic when you need to prove type safety for a programme.
+   Same strategy as stack_bounds_tac: full normalisation evaluates the
+   decidable check to true on concrete programmes.
+*)
+let type_check_tac () : Tac unit =
   norm [delta; iota; zeta; primops];
   trivial ()
 
