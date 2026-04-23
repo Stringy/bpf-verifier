@@ -8,11 +8,12 @@ fn verify_good(spec_path: &Path) -> datatest_stable::Result<()> {
         .join("corpus/good")
         .join(format!("{name}.bpf.o"));
 
+    let spec_arg = format!("test:{}", spec_path.display());
     let output = std::process::Command::new(cargo_bin("bpf-verifier"))
         .arg("verify")
         .arg(&obj)
         .arg("--spec")
-        .arg(spec_path)
+        .arg(&spec_arg)
         .output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -33,11 +34,12 @@ fn verify_bad(spec_path: &Path) -> datatest_stable::Result<()> {
         .join("corpus/bad")
         .join(format!("{name}.bpf.o"));
 
+    let spec_arg = format!("test:{}", spec_path.display());
     let output = std::process::Command::new(cargo_bin("bpf-verifier"))
         .arg("verify")
         .arg(&obj)
         .arg("--spec")
-        .arg(spec_path)
+        .arg(&spec_arg)
         .output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);

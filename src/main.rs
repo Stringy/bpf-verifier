@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
 use bpf_verifier::codegen::fstar::generate_fstar;
-use bpf_verifier::elf::parser::parse_elf;
+use bpf_verifier::elf::parser::{parse_elf, BpfProgram};
 use bpf_verifier::verify::runner::{FstarRunner, VerifyResult};
 
 #[derive(Parser)]
@@ -20,8 +21,11 @@ enum Commands {
         #[arg(help = "Path to BPF object file")]
         program: PathBuf,
 
-        #[arg(long, help = "Path to F* spec file (omit for crash-safety default)")]
-        spec: Option<PathBuf>,
+        #[arg(long, help = "Spec for a section (section:path.fst), repeatable")]
+        spec: Vec<String>,
+
+        #[arg(long, help = "Only verify these sections, repeatable")]
+        section: Vec<String>,
 
         #[arg(long, help = "Show detailed verification output")]
         verbose: bool,
@@ -44,27 +48,55 @@ fn project_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+fn parse_spec_args(specs: &[String]) -> Result<HashMap<String, PathBuf>, String> {
+    let mut map = HashMap::new();
+    for s in specs {
+        if let Some((section, path)) = s.split_once(':') {
+            map.insert(section.to_string(), PathBuf::from(path));
+        } else {
+            return Err(format!(
+                "invalid --spec format '{s}': expected section:path.fst"
+            ));
+        }
+    }
+    Ok(map)
+}
+
 fn main() {
     let cli = Cli::parse();
     match cli.command {
         Commands::Verify {
             program,
             spec,
+            section,
             verbose,
             fstar_path,
         } => {
-            std::process::exit(run_verify(&program, spec.as_deref(), verbose, fstar_path.as_deref()));
+            let spec_map = match parse_spec_args(&spec) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(2);
+                }
+            };
+            std::process::exit(run_verify(
+                &program,
+                &spec_map,
+                &section,
+                verbose,
+                fstar_path.as_deref(),
+            ));
         }
     }
 }
 
 fn run_verify(
     program_path: &Path,
-    spec_path: Option<&Path>,
+    spec_map: &HashMap<String, PathBuf>,
+    sections: &[String],
     verbose: bool,
     fstar_path_override: Option<&Path>,
 ) -> i32 {
-    // 1. Read and parse the ELF file
     let elf_data = match std::fs::read(program_path) {
         Ok(data) => data,
         Err(e) => {
@@ -81,103 +113,139 @@ fn run_verify(
         }
     };
 
-    // 2. Take the first program section
-    let prog = match bpf_object.programs.first() {
-        Some(p) => p,
-        None => {
-            eprintln!("error: no program sections in {}", program_path.display());
-            return 2;
+    if bpf_object.programs.is_empty() {
+        eprintln!("error: no program sections in {}", program_path.display());
+        return 2;
+    }
+
+    let programs: Vec<&BpfProgram> = if sections.is_empty() {
+        bpf_object.programs.iter().collect()
+    } else {
+        let mut selected = Vec::new();
+        for name in sections {
+            match bpf_object.programs.iter().find(|p| p.section_name == *name) {
+                Some(p) => selected.push(p),
+                None => {
+                    eprintln!(
+                        "error: section '{}' not found. available: {}",
+                        name,
+                        bpf_object
+                            .programs
+                            .iter()
+                            .map(|p| p.section_name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    return 2;
+                }
+            }
         }
+        selected
     };
+
+    if programs.len() > 1 {
+        eprintln!("Verifying {} programmes in {}...", programs.len(), program_path.display());
+    }
+
+    let root = project_root();
+    let mut passed = 0;
+    let mut failed = 0;
+
+    for prog in &programs {
+        let spec_path = spec_map.get(&prog.section_name).map(|p| p.as_path());
+        match verify_program(prog, spec_path, &root, fstar_path_override, verbose) {
+            Ok(true) => {
+                let label = if spec_path.is_some() {
+                    "satisfies spec"
+                } else {
+                    "verified (crash safety + safety layers)"
+                };
+                println!("  OK: {} {label}", prog.section_name);
+                passed += 1;
+            }
+            Ok(false) => {
+                println!("  FAIL: {} does not satisfy spec", prog.section_name);
+                failed += 1;
+            }
+            Err(e) => {
+                eprintln!("  error: {}: {e}", prog.section_name);
+                return 2;
+            }
+        }
+    }
+
+    if programs.len() > 1 {
+        eprintln!(
+            "\n{} of {} programmes passed verification",
+            passed,
+            passed + failed
+        );
+    }
+
+    if failed > 0 { 1 } else { 0 }
+}
+
+fn verify_program(
+    prog: &BpfProgram,
+    spec_path: Option<&Path>,
+    project_root: &Path,
+    fstar_path_override: Option<&Path>,
+    verbose: bool,
+) -> Result<bool, String> {
     let program_name = &prog.section_name;
     let safe_name = program_name.replace('/', "_");
 
-    // 3. Determine spec module — user-provided or default crash safety
     let (spec_module, spec_name) = if let Some(path) = spec_path {
         let module = path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("Spec");
-        (module, "spec")
+        (module.to_string(), "spec".to_string())
     } else {
-        ("BPF.DefaultSpec", "spec")
+        ("BPF.DefaultSpec".to_string(), "spec".to_string())
     };
 
-    // 4. Generate F* source
-    let fstar_source = generate_fstar(&safe_name, &prog.instructions, spec_module, spec_name);
+    let fstar_source = generate_fstar(&safe_name, &prog.instructions, &spec_module, &spec_name);
 
     if verbose {
-        eprintln!("--- Generated F* source ---");
+        eprintln!("--- Generated F* source for {program_name} ---");
         eprintln!("{fstar_source}");
         eprintln!("--- End generated F* source ---");
     }
 
-    // 5. Write generated .fst to a temp directory
-    let tmp_dir = match tempfile::TempDir::new() {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("error: failed to create temp directory: {e}");
-            return 2;
-        }
-    };
+    let tmp_dir = tempfile::TempDir::new()
+        .map_err(|e| format!("failed to create temp directory: {e}"))?;
 
     let fst_filename = format!("Verify_{safe_name}.fst");
     let fst_path = tmp_dir.path().join(&fst_filename);
-    if let Err(e) = std::fs::write(&fst_path, &fstar_source) {
-        eprintln!("error: failed to write generated F* file: {e}");
-        return 2;
-    }
+    std::fs::write(&fst_path, &fstar_source)
+        .map_err(|e| format!("failed to write generated F* file: {e}"))?;
 
-    // 6. Copy the user's spec file into the temp dir (if provided)
     if let Some(path) = spec_path {
         let spec_dest = tmp_dir.path().join(
             path.file_name()
                 .unwrap_or_else(|| std::ffi::OsStr::new("Spec.fst")),
         );
-        if let Err(e) = std::fs::copy(path, &spec_dest) {
-            eprintln!(
-                "error: failed to copy spec file {}: {e}",
-                path.display()
-            );
-            return 2;
-        }
+        std::fs::copy(path, &spec_dest)
+            .map_err(|e| format!("failed to copy spec file {}: {e}", path.display()))?;
     }
 
-    // 7. Find F* binary and set up include dirs
-    let root = project_root();
-    let include_dirs = vec![root.join("fstar"), tmp_dir.path().to_path_buf()];
+    let include_dirs = vec![project_root.join("fstar"), tmp_dir.path().to_path_buf()];
     let runner = if let Some(override_path) = fstar_path_override {
         FstarRunner::new(override_path.to_path_buf(), include_dirs)
     } else {
-        match FstarRunner::find_fstar(&root, include_dirs) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("error: {e}");
-                return 2;
-            }
-        }
+        FstarRunner::find_fstar(project_root, include_dirs)
+            .map_err(|e| format!("{e}"))?
     };
 
-    // 9. Run verification
     match runner.verify(&fst_path) {
-        Ok(VerifyResult::Pass) => {
-            if spec_path.is_some() {
-                println!("OK: {program_name} satisfies spec");
-            } else {
-                println!("OK: {program_name} verified (crash safety + safety layers)");
-            }
-            0
-        }
+        Ok(VerifyResult::Pass) => Ok(true),
         Ok(VerifyResult::Fail { message }) => {
             if verbose {
                 eprintln!("{message}");
             }
-            println!("FAIL: {program_name} does not satisfy spec");
-            1
+            Ok(false)
         }
-        Err(e) => {
-            eprintln!("error: {e}");
-            2
-        }
+        Err(e) => Err(format!("{e}")),
     }
 }
