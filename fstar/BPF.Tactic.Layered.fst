@@ -125,3 +125,20 @@ let null_check_tac () : Tac unit =
 let bpf_auto_layered () : Tac unit =
   norm [nbe; delta; iota; zeta; primops];
   smt ()
+
+(* Unfold exec_program by `count` steps, normalising after each.
+   This keeps the term size bounded by the number of instructions
+   in one basic block rather than the full programme. *)
+let rec norm_steps (count: nat) : Tac unit =
+  if count = 0 then ()
+  else begin
+    norm [delta_only [`%exec_program]; iota; zeta; primops];
+    norm_steps (count - 1)
+  end
+
+(* Chunked functional proof: normalise block-by-block, then finish
+   with full normalisation and SMT. *)
+let bpf_auto_chunked (block_sizes: list int) : Tac unit =
+  iter (fun size -> norm_steps size) block_sizes;
+  norm [nbe; delta; iota; zeta; primops];
+  smt ()

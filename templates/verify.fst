@@ -50,11 +50,11 @@ let ns_proof : squash (null_check program = true) =
 #pop-options
 {%- endif %}
 
-(* Functional correctness *)
-#push-options "--z3rlimit 60"
+(* Functional correctness — chunked by basic block *)
+#push-options "--z3rlimit 120"
 let proof : squash (program_satisfies program {{ spec_name }}) =
 {%- for i in 0..hints.len() %}
   FStar.Classical.forall_intro (FStar.Classical.move_requires bitwise_hint_{{ i }});
 {%- endfor %}
-  _ by (bpf_auto_{% if has_map_calls %}map{% else %}pure{% endif %} ())
+  _ by (bpf_auto_chunked [{% for size in block_sizes %}{{ size }}{% if !loop.last %}; {% endif %}{% endfor %}])
 #pop-options
