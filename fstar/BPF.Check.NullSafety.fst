@@ -76,30 +76,18 @@ let ns_set (abs: abs_state_ns) (r: reg_idx) (s: null_status) : abs_state_ns =
 let ns_init : abs_state_ns =
   fun _ -> NotMap
 
-(* --- Branch target tracking ---
-   When we encounter a null-check branch (JEQ/JNE against 0), we fork
-   the abstract state. The fall-through path gets one state and the
-   jump target gets another. We record the jump target's state here so
-   it can be merged when we reach that pc.
+(* --- Branch target map ---
+   Function-based map from pc to saved abstract state. Lookup is a
+   single beta-reduction step -- the normaliser handles this instantly
+   regardless of how many branches have been recorded.
 
-   Each entry is a (target_pc, abstract_state) pair. Multiple branches
-   can target the same pc, so we may have multiple entries for one pc.
-   The merge function handles combining them all.
+   When multiple branches target the same pc, their states are joined
+   at insertion time. *)
+type target_map = int -> option abs_state_ns
 
-   We use `int` for the target pc rather than `nat` because branch
-   offsets can be negative (backward jumps), and pc + 1 + offset may
-   yield a negative value for malformed programmes. Using `int` avoids
-   a subtyping obligation that F* can't always discharge. *)
-type branch_targets = list (int & abs_state_ns)
+let empty_targets : target_map = fun _ -> None
 
-(* --- Join function for merging two null statuses ---
-   At a branch join point, we merge the null status from each path.
-   The rule is conservative:
-   - If both paths agree on the status, keep it
-   - Otherwise, fall back to Unchecked (must re-check)
-
-   This is sound because Unchecked will force a null check before
-   any dereference, which is always safe (if overly conservative). *)
+(* --- Join --- *)
 let join_status (a b: null_status) : null_status =
   match a, b with
   | Checked, Checked     -> Checked
@@ -108,51 +96,26 @@ let join_status (a b: null_status) : null_status =
   | NotMap, NotMap        -> NotMap
   | _, _                  -> Unchecked
 
-(* Join two full abstract states register-by-register.
-   Each register gets the join of its status from both states. *)
 let join_states (a b: abs_state_ns) : abs_state_ns =
   fun r -> join_status (a r) (b r)
 
-(* --- Branch target merging ---
-   When we reach a particular pc, check if any branch targets point
-   here. If so, merge all their saved states into the current state
-   and remove them from the list.
+(* Record a branch target, joining with any existing state at that pc. *)
+let add_target (targets: target_map) (pc: int) (state: abs_state_ns) : target_map =
+  fun i -> if i = pc then
+    (match targets i with
+     | Some existing -> Some (join_states existing state)
+     | None -> Some state)
+  else targets i
 
-   This is done in two passes:
-   1. merge_targets_at: fold over matching targets, joining their
-      states into the current state
-   2. remove_targets_at: filter out entries for this pc *)
-
-(* Merge all saved branch states targeting this pc into the current state.
-   We fold over the target list, joining any matching entry's state
-   into the accumulator. Non-matching entries are ignored. *)
-let rec merge_targets_at (pc: int) (targets: branch_targets) (acc: abs_state_ns)
-  : Tot abs_state_ns (decreases targets) =
-  match targets with
-  | [] -> acc
-  | (tpc, tstate) :: rest ->
-    if tpc = pc
-    then merge_targets_at pc rest (join_states acc tstate)
-    else merge_targets_at pc rest acc
-
-(* Remove all branch target entries for a given pc.
-   After merging, we don't need them any more. *)
-let rec remove_targets_at (pc: int) (targets: branch_targets)
-  : Tot branch_targets (decreases targets) =
-  match targets with
-  | [] -> []
-  | (tpc, tstate) :: rest ->
-    if tpc = pc
-    then remove_targets_at pc rest
-    else (tpc, tstate) :: remove_targets_at pc rest
-
-(* Convenience: merge and clean up in one step.
-   Returns the merged abstract state and the cleaned target list. *)
-let apply_targets (abs: abs_state_ns) (pc: int) (targets: branch_targets)
-  : abs_state_ns & branch_targets =
-  let merged = merge_targets_at pc targets abs in
-  let cleaned = remove_targets_at pc targets in
-  (merged, cleaned)
+(* Merge any saved state at this pc into the current state and clear it. *)
+let apply_targets (abs: abs_state_ns) (pc: int) (targets: target_map)
+  : abs_state_ns & target_map =
+  match targets pc with
+  | Some saved ->
+    let merged = join_states abs saved in
+    let cleared = fun i -> if i = pc then None else targets i in
+    (merged, cleared)
+  | None -> (abs, targets)
 
 (* --- Safety predicate for memory loads ---
    A load through a register is safe only if the register is Checked
@@ -177,8 +140,8 @@ let is_safe_deref (s: null_status) : bool =
 
    This function must handle ALL 16 bpf_insn constructors. Missing
    any constructor would cause an F* incomplete-match error. *)
-let check_insn_ns (abs: abs_state_ns) (insn: bpf_insn) (pc: int) (targets: branch_targets)
-  : option (abs_state_ns & branch_targets) =
+let check_insn_ns (abs: abs_state_ns) (insn: bpf_insn) (pc: int) (targets: target_map)
+  : option (abs_state_ns & target_map) =
 
   (* Step 1: merge any saved branch states targeting this pc *)
   let (abs, targets) = apply_targets abs pc targets in
@@ -271,37 +234,23 @@ let check_insn_ns (abs: abs_state_ns) (insn: bpf_insn) (pc: int) (targets: branc
       let fall_abs = ns_set abs dst Checked in
       let jump_abs = ns_set abs dst IsNull in
       let target_pc = pc + 1 + offset in
-      Some (fall_abs, (target_pc, jump_abs) :: targets)
+      Some (fall_abs, add_target targets target_pc jump_abs)
     else if dst_status = Unchecked && imm_is_zero && op = JNE then
-      (* JNE dst 0: fall-through means dst is null (IsNull),
-         jump target means dst is non-null (Checked) *)
       let fall_abs = ns_set abs dst IsNull in
       let jump_abs = ns_set abs dst Checked in
       let target_pc = pc + 1 + offset in
-      Some (fall_abs, (target_pc, jump_abs) :: targets)
+      Some (fall_abs, add_target targets target_pc jump_abs)
     else
-      (* Non-null-check branch: record target with current state for
-         merge at the join point, but don't change null status *)
       let target_pc = pc + 1 + offset in
-      Some (abs, (target_pc, abs) :: targets)
+      Some (abs, add_target targets target_pc abs)
 
-  (* --- 64-bit conditional jump, register operands ---
-     We don't detect null checks via register comparison (would need
-     to know the other register is zero). Conservatively record the
-     branch target with the current state for merging. *)
   | BPF_JMP64_REG _ _ _ offset ->
-    let target_pc = pc + 1 + offset in
-    Some (abs, (target_pc, abs) :: targets)
+    Some (abs, add_target targets (pc + 1 + offset) abs)
 
-  (* --- 32-bit conditional jumps ---
-     32-bit comparisons are unlikely to be used for null checks on
-     64-bit pointers. Record targets for merging, don't change status. *)
   | BPF_JMP32_IMM _ _ _ offset ->
-    let target_pc = pc + 1 + offset in
-    Some (abs, (target_pc, abs) :: targets)
+    Some (abs, add_target targets (pc + 1 + offset) abs)
   | BPF_JMP32_REG _ _ _ offset ->
-    let target_pc = pc + 1 + offset in
-    Some (abs, (target_pc, abs) :: targets)
+    Some (abs, add_target targets (pc + 1 + offset) abs)
 
   (* --- Unconditional jump: no state change, no branch target ---
      JA always jumps, so there's no fork. The analysis continues at
@@ -344,19 +293,14 @@ let check_insn_ns (abs: abs_state_ns) (insn: bpf_insn) (pc: int) (targets: branc
    This is O(n) in programme length (with a small constant for branch
    target list operations). The `decreases prog` annotation proves
    termination: the instruction list shrinks by one on each call. *)
-let rec check_program_ns_loop (abs: abs_state_ns) (prog: list bpf_insn) (pc: int) (targets: branch_targets)
+let rec check_program_ns_loop (abs: abs_state_ns) (prog: list bpf_insn) (pc: int) (targets: target_map)
   : Tot bool (decreases prog) =
   match prog with
-  | [] -> true  (* Reached the end without finding a null safety violation *)
+  | [] -> true
   | insn :: rest ->
     match check_insn_ns abs insn pc targets with
-    | None -> false   (* Null safety violation detected *)
+    | None -> false
     | Some (abs', targets') -> check_program_ns_loop abs' rest (pc + 1) targets'
 
-(* Top-level entry point: check a complete BPF programme for null safety.
-   Starts with the initial abstract state (all registers NotMap, no
-   branch targets) and walks every instruction. Returns true if all
-   map pointer dereferences are guarded by null checks, false if any
-   dereference could happen without a null check. *)
 let null_check (prog: bpf_program) : bool =
-  check_program_ns_loop ns_init prog 0 []
+  check_program_ns_loop ns_init prog 0 empty_targets
