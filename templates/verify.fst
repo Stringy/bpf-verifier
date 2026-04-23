@@ -30,11 +30,18 @@ open FStar.UInt64
 {%- endfor %}
 {%- endif %}
 
-(* Stack bounds safety — Rust-computed witness, each step validated by F* *)
+(* Stack bounds safety *)
+{%- if sb_witness_steps.is_empty() %}
+#push-options "--z3rlimit 60"
+let sb_proof : squash (stack_bounds_check program = true) =
+  _ by (stack_bounds_tac ())
+#pop-options
+{%- else %}
 open BPF.Witness
 {%- for step in sb_witness_steps %}
 {{ step }}
 {%- endfor %}
+{%- endif %}
 
 (* Type safety — verified by abstract interpretation *)
 #push-options "--z3rlimit 60"
@@ -50,11 +57,15 @@ let ns_proof : squash (null_check program = true) =
 #pop-options
 {%- endif %}
 
-(* Functional correctness — chunked by basic block *)
+(* Functional correctness *)
 #push-options "--z3rlimit 120"
 let proof : squash (program_satisfies program {{ spec_name }}) =
 {%- for i in 0..hints.len() %}
   FStar.Classical.forall_intro (FStar.Classical.move_requires bitwise_hint_{{ i }});
 {%- endfor %}
+{%- if block_sizes.len() > 1 %}
   _ by (bpf_auto_chunked [{% for size in block_sizes %}{{ size }}{% if !loop.last %}; {% endif %}{% endfor %}])
+{%- else %}
+  _ by (bpf_auto_{% if has_map_calls %}map{% else %}pure{% endif %} ())
+{%- endif %}
 #pop-options

@@ -33,12 +33,19 @@ pub fn generate_fstar(
     let has_map_calls = instructions.iter().any(|i| matches!(i.opcode, Opcode::Call));
     let blocks = find_basic_blocks(instructions);
     let block_sizes: Vec<usize> = blocks.iter().map(|b| b.len()).collect();
-    let sb_witness_steps: Vec<String> = sb_witness.steps.iter()
-        .enumerate()
-        .flat_map(|(i, step)| {
-            vec![step.to_fstar_let(i), step.to_fstar_assert(i)]
-        })
-        .collect();
+    // Witness chain for large programmes where the tactic would time out.
+    // Currently disabled — the top-level let chain causes F* subtyping
+    // issues beyond ~50 steps. Needs wrapping in a function body.
+    let sb_witness_steps: Vec<String> = if instructions.len() > 500 {
+        sb_witness.steps.iter()
+            .enumerate()
+            .flat_map(|(i, step)| {
+                vec![step.to_fstar_let(i), step.to_fstar_assert(i)]
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let annotated: Vec<String> = instructions
         .iter()
         .zip(source_locs.iter())
