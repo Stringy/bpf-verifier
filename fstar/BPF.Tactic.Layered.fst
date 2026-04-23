@@ -49,7 +49,7 @@ open BPF.Exec.Safe
    Use this tactic when you need to prove stack_safe evidence for a programme.
 *)
 let stack_bounds_tac () : Tac unit =
-  norm [delta; iota; zeta; primops];
+  norm [nbe; delta; iota; zeta; primops];
   trivial ()
 
 (*
@@ -73,7 +73,7 @@ let stack_bounds_tac () : Tac unit =
    decidable check to true on concrete programmes.
 *)
 let type_check_tac () : Tac unit =
-  norm [delta; iota; zeta; primops];
+  norm [nbe; delta; iota; zeta; primops];
   trivial ()
 
 (*
@@ -97,7 +97,7 @@ let type_check_tac () : Tac unit =
    normalisation evaluates the decidable check to true on concrete programmes.
 *)
 let null_check_tac () : Tac unit =
-  norm [delta; iota; zeta; primops];
+  norm [nbe; delta; iota; zeta; primops];
   trivial ()
 
 (*
@@ -123,5 +123,5 @@ let null_check_tac () : Tac unit =
    for a programme that has stack_safe evidence.
 *)
 let bpf_auto_layered () : Tac unit =
-  norm [delta; iota; zeta; primops];
+  norm [nbe; delta; iota; zeta; primops];
   smt ()
