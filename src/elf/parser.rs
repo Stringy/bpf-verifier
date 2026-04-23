@@ -1,5 +1,6 @@
 use object::read::ObjectSection;
 use object::{File, Object, SectionKind};
+use addr2line::gimli;
 
 use crate::bpf::instruction::{BpfInsn, Opcode};
 
@@ -15,10 +16,17 @@ pub enum ParseError {
     UnalignedSection(String),
 }
 
+#[derive(Debug, Clone)]
+pub struct SourceLoc {
+    pub file: String,
+    pub line: u32,
+}
+
 #[derive(Debug)]
 pub struct BpfProgram {
     pub section_name: String,
     pub instructions: Vec<BpfInsn>,
+    pub source_locs: Vec<Option<SourceLoc>>,
 }
 
 #[derive(Debug)]
@@ -34,6 +42,8 @@ pub struct BpfObject {
 /// instructions.
 pub fn parse_elf(data: &[u8]) -> Result<BpfObject, ParseError> {
     let file = File::parse(data)?;
+
+    let addr2line_ctx = build_addr2line_context(&file);
 
     let mut programs = Vec::new();
 
@@ -53,23 +63,31 @@ pub fn parse_elf(data: &[u8]) -> Result<BpfObject, ParseError> {
             return Err(ParseError::UnalignedSection(name));
         }
 
+        let section_addr = section.address();
         let mut instructions = Vec::new();
+        let mut source_locs = Vec::new();
+        let mut byte_offset: u64 = 0;
         let mut chunks = section_data.chunks_exact(8);
         while let Some(chunk) = chunks.next() {
             let raw = u64::from_le_bytes(chunk.try_into().expect("chunks_exact(8) guarantees 8 bytes"));
+            let insn_addr = section_addr + byte_offset;
             if let Some(mut insn) = BpfInsn::decode(raw) {
                 if insn.opcode == Opcode::LdImm64 && let Some(next_chunk) = chunks.next() {
                     let raw2 = u64::from_le_bytes(next_chunk.try_into().expect("chunks_exact(8) guarantees 8 bytes"));
                     let high = i32::from_le_bytes(raw2.to_le_bytes()[4..8].try_into().expect("4-byte slice"));
                     insn.imm64 = Some((insn.imm as u32 as u64) | ((high as u32 as u64) << 32));
+                    byte_offset += 8;
                 }
                 instructions.push(insn);
+                source_locs.push(lookup_source_loc(&addr2line_ctx, insn_addr));
             }
+            byte_offset += 8;
         }
 
         programs.push(BpfProgram {
             section_name: name,
             instructions,
+            source_locs,
         });
     }
 
@@ -78,6 +96,33 @@ pub fn parse_elf(data: &[u8]) -> Result<BpfObject, ParseError> {
     }
 
     Ok(BpfObject { programs })
+}
+
+type Addr2LineCtx<'a> = addr2line::Context<gimli::EndianSlice<'a, gimli::LittleEndian>>;
+
+fn build_addr2line_context<'a>(file: &'a File<'a>) -> Option<Addr2LineCtx<'a>> {
+    let load_section = |id: gimli::SectionId| -> Result<gimli::EndianSlice<gimli::LittleEndian>, gimli::Error> {
+        use object::ObjectSection;
+        let data = file
+            .section_by_name(id.name())
+            .and_then(|s| s.data().ok())
+            .unwrap_or(&[]);
+        Ok(gimli::EndianSlice::new(data, gimli::LittleEndian))
+    };
+    let dwarf = gimli::Dwarf::load(&load_section).ok()?;
+    addr2line::Context::from_dwarf(dwarf).ok()
+}
+
+fn lookup_source_loc(ctx: &Option<Addr2LineCtx>, addr: u64) -> Option<SourceLoc> {
+    let ctx = ctx.as_ref()?;
+    let loc = ctx.find_location(addr).ok()??;
+    let file = loc.file?;
+    let line = loc.line?;
+    let basename = file.rsplit('/').next().unwrap_or(file);
+    Some(SourceLoc {
+        file: basename.to_string(),
+        line,
+    })
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@ use std::fmt::Write;
 use askama::Template;
 
 use crate::bpf::instruction::{AluOp, BpfInsn, Opcode, Source};
+use crate::elf::parser::SourceLoc;
 
 #[derive(Template)]
 #[template(path = "verify.fst")]
@@ -19,16 +20,25 @@ struct VerifyModule<'a> {
 pub fn generate_fstar(
     program_name: &str,
     instructions: &[BpfInsn],
+    source_locs: &[Option<SourceLoc>],
     spec_module: &str,
     spec_name: &str,
 ) -> String {
     let hints = generate_bitwise_hints(instructions);
     let has_map_calls = instructions.iter().any(|i| matches!(i.opcode, Opcode::Call));
+    let annotated: Vec<String> = instructions
+        .iter()
+        .zip(source_locs.iter())
+        .map(|(insn, loc)| match loc {
+            Some(sl) => format!("{}  (* {}:{} *)", insn.to_fstar(), sl.file, sl.line),
+            None => insn.to_fstar(),
+        })
+        .collect();
     let tmpl = VerifyModule {
         program_name,
         spec_module,
         spec_name,
-        instructions: instructions.iter().map(|i| i.to_fstar()).collect(),
+        instructions: annotated,
         hints,
         has_map_calls,
     };
@@ -121,7 +131,8 @@ mod tests {
             BpfInsn::decode(0x0000_0000_0000_0095).unwrap(), // exit
         ];
 
-        let output = generate_fstar("test_prog", &instructions, "TestSpec", "test_spec");
+        let source_locs: Vec<Option<SourceLoc>> = vec![None; instructions.len()];
+        let output = generate_fstar("test_prog", &instructions, &source_locs, "TestSpec", "test_spec");
 
         assert!(output.contains("module Verify_test_prog"));
         assert!(output.contains("open BPF.State"));

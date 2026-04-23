@@ -9,6 +9,7 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 tempfile = "3"
 askama = "0.15.6"
+addr2line = "0.26.1"
 
 [dev-dependencies]
 assert_cmd = "2"

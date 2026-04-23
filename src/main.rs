@@ -205,7 +205,7 @@ fn verify_program(
         ("BPF.DefaultSpec".to_string(), "spec".to_string())
     };
 
-    let fstar_source = generate_fstar(&safe_name, &prog.instructions, &spec_module, &spec_name);
+    let fstar_source = generate_fstar(&safe_name, &prog.instructions, &prog.source_locs, &spec_module, &spec_name);
 
     if verbose {
         eprintln!("--- Generated F* source for {program_name} ---");
