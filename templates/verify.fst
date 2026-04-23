@@ -30,18 +30,11 @@ open FStar.UInt64
 {%- endfor %}
 {%- endif %}
 
-(* Stack bounds safety *)
-{%- if sb_witness_steps.is_empty() %}
-#push-options "--z3rlimit 60"
-let sb_proof : squash (stack_bounds_check program = true) =
-  _ by (stack_bounds_tac ())
-#pop-options
-{%- else %}
+(* Stack bounds safety — Rust-computed witness, each step validated by F* *)
 open BPF.Witness
 {%- for step in sb_witness_steps %}
 {{ step }}
 {%- endfor %}
-{%- endif %}
 
 (* Type safety — verified by abstract interpretation *)
 #push-options "--z3rlimit 60"

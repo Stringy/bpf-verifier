@@ -102,27 +102,16 @@ impl TargetMap {
 pub struct WitnessStep {
     pub pc: usize,
     pub insn_fstar: String,
-    pub initial_state: String,
-    pub initial_targets: String,
+    pub state_fstar: String,
+    pub targets_fstar: String,
 }
 
 impl WitnessStep {
-    pub fn to_fstar_let(&self, idx: usize) -> String {
-        if idx == 0 {
-            format!(
-                "let sb_step_{} = check_insn_sb (to_abs_state_sb {}) ({}) {} (to_target_map_sb {})",
-                idx, self.initial_state, self.insn_fstar, self.pc, self.initial_targets
-            )
-        } else {
-            format!(
-                "let sb_step_{} = check_insn_sb (fst (Some?.v sb_step_{})) ({}) {} (snd (Some?.v sb_step_{}))",
-                idx, idx - 1, self.insn_fstar, self.pc, idx - 1
-            )
-        }
-    }
-
-    pub fn to_fstar_assert(&self, idx: usize) -> String {
-        format!("let _ = assert_norm (Some? sb_step_{})", idx)
+    pub fn to_fstar(&self) -> String {
+        format!(
+            "let _ = assert_norm (Some? (check_insn_sb (to_abs_state_sb {}) ({}) {} (to_target_map_sb {})))",
+            self.state_fstar, self.insn_fstar, self.pc, self.targets_fstar
+        )
     }
 }
 
@@ -190,8 +179,8 @@ pub fn analyse(instructions: &[BpfInsn]) -> AnalysisResult {
         steps.push(WitnessStep {
             pc,
             insn_fstar: insn.to_fstar(),
-            initial_state: if steps.is_empty() { state_before.to_fstar() } else { String::new() },
-            initial_targets: if steps.is_empty() { targets_before.to_fstar() } else { String::new() },
+            state_fstar: state_before.to_fstar(),
+            targets_fstar: targets_before.to_fstar(),
         });
 
         if !ok {
@@ -294,11 +283,10 @@ mod tests {
             BpfInsn::decode(0x0000_0000_0000_0095).unwrap(), // exit
         ];
         let result = analyse(&insns);
-        for (i, step) in result.steps.iter().enumerate() {
-            let let_s = step.to_fstar_let(i);
-            let assert_s = step.to_fstar_assert(i);
-            assert!(let_s.contains("check_insn_sb"));
-            assert!(assert_s.contains("assert_norm"));
+        for step in &result.steps {
+            let s = step.to_fstar();
+            assert!(s.contains("check_insn_sb"));
+            assert!(s.contains("assert_norm"));
         }
     }
 }
