@@ -34,6 +34,16 @@ enum Commands {
         #[arg(long, help = "Path to F* binary (overrides auto-detection)")]
         fstar_path: Option<PathBuf>,
     },
+    Codegen {
+        #[arg(help = "Path to BPF object file")]
+        program: PathBuf,
+
+        #[arg(long, help = "Section to generate code for (default: first)")]
+        section: Option<String>,
+
+        #[arg(long, help = "Path to F* spec file")]
+        spec: Option<PathBuf>,
+    },
 }
 
 fn project_root() -> PathBuf {
@@ -88,7 +98,91 @@ fn main() {
                 fstar_path.as_deref(),
             ));
         }
+        Commands::Codegen {
+            program,
+            section,
+            spec,
+        } => {
+            std::process::exit(run_codegen(&program, section.as_deref(), spec.as_deref()));
+        }
     }
+}
+
+fn run_codegen(
+    program_path: &Path,
+    section: Option<&str>,
+    spec_path: Option<&Path>,
+) -> i32 {
+    // spec_path is a simple path to a .fst file (no section: prefix)
+    let elf_data = match std::fs::read(program_path) {
+        Ok(data) => data,
+        Err(e) => {
+            eprintln!("error: failed to read {}: {e}", program_path.display());
+            return 2;
+        }
+    };
+
+    let bpf_object = match parse_elf(&elf_data) {
+        Ok(obj) => obj,
+        Err(e) => {
+            eprintln!("error: failed to parse ELF: {e}");
+            return 2;
+        }
+    };
+
+    let prog = if let Some(name) = section {
+        match bpf_object.programs.iter().find(|p| p.section_name == name) {
+            Some(p) => p,
+            None => {
+                eprintln!(
+                    "error: section '{}' not found. available: {}",
+                    name,
+                    bpf_object.programs.iter()
+                        .map(|p| p.section_name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                return 2;
+            }
+        }
+    } else {
+        match bpf_object.programs.first() {
+            Some(p) => p,
+            None => {
+                eprintln!("error: no program sections in {}", program_path.display());
+                return 2;
+            }
+        }
+    };
+
+    let safe_name = prog.section_name.replace('/', "_");
+
+    let (spec_module, spec_name) = if let Some(path) = spec_path {
+        let module = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Spec");
+        (module.to_string(), "spec".to_string())
+    } else {
+        ("BPF.DefaultSpec".to_string(), "spec".to_string())
+    };
+
+    let sb_witness = stack_bounds::analyse(&prog.instructions);
+    if !sb_witness.passed {
+        eprintln!(
+            "error: stack bounds check failed at instruction {}",
+            sb_witness.failing_pc.unwrap_or(0)
+        );
+        return 1;
+    }
+
+    let fstar_source = generate_fstar(
+        &safe_name, &prog.instructions, &prog.source_locs,
+        &spec_module, &spec_name, &sb_witness,
+    );
+
+    print!("{fstar_source}");
+    0
 }
 
 fn run_verify(
