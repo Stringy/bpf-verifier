@@ -3,6 +3,7 @@ use std::fmt::Write;
 
 use askama::Template;
 
+use crate::analysis::stack_bounds::AnalysisResult;
 use crate::bpf::basic_block::find_basic_blocks;
 use crate::bpf::instruction::{AluOp, BpfInsn, Opcode, Source};
 use crate::elf::parser::SourceLoc;
@@ -17,6 +18,7 @@ struct VerifyModule<'a> {
     hints: Vec<String>,
     has_map_calls: bool,
     block_sizes: Vec<usize>,
+    sb_witness_steps: Vec<String>,
 }
 
 pub fn generate_fstar(
@@ -25,11 +27,18 @@ pub fn generate_fstar(
     source_locs: &[Option<SourceLoc>],
     spec_module: &str,
     spec_name: &str,
+    sb_witness: &AnalysisResult,
 ) -> String {
     let hints = generate_bitwise_hints(instructions);
     let has_map_calls = instructions.iter().any(|i| matches!(i.opcode, Opcode::Call));
     let blocks = find_basic_blocks(instructions);
     let block_sizes: Vec<usize> = blocks.iter().map(|b| b.len()).collect();
+    let sb_witness_steps: Vec<String> = sb_witness.steps.iter()
+        .enumerate()
+        .flat_map(|(i, step)| {
+            vec![step.to_fstar_let(i), step.to_fstar_assert(i)]
+        })
+        .collect();
     let annotated: Vec<String> = instructions
         .iter()
         .zip(source_locs.iter())
@@ -46,6 +55,7 @@ pub fn generate_fstar(
         hints,
         has_map_calls,
         block_sizes,
+        sb_witness_steps,
     };
     tmpl.render().expect("failed to render F* template")
 }
@@ -137,7 +147,8 @@ mod tests {
         ];
 
         let source_locs: Vec<Option<SourceLoc>> = vec![None; instructions.len()];
-        let output = generate_fstar("test_prog", &instructions, &source_locs, "TestSpec", "test_spec");
+        let sb_witness = crate::analysis::stack_bounds::analyse(&instructions);
+        let output = generate_fstar("test_prog", &instructions, &source_locs, "TestSpec", "test_spec", &sb_witness);
 
         assert!(output.contains("module Verify_test_prog"));
         assert!(output.contains("open BPF.State"));

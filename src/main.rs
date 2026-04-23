@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
+use bpf_verifier::analysis::stack_bounds;
 use bpf_verifier::codegen::fstar::generate_fstar;
 use bpf_verifier::elf::parser::{parse_elf, BpfProgram};
 use bpf_verifier::verify::runner::{FstarRunner, VerifyResult};
@@ -205,7 +206,15 @@ fn verify_program(
         ("BPF.DefaultSpec".to_string(), "spec".to_string())
     };
 
-    let fstar_source = generate_fstar(&safe_name, &prog.instructions, &prog.source_locs, &spec_module, &spec_name);
+    let sb_witness = stack_bounds::analyse(&prog.instructions);
+    if !sb_witness.passed {
+        return Err(format!(
+            "stack bounds check failed at instruction {}",
+            sb_witness.failing_pc.unwrap_or(0)
+        ));
+    }
+
+    let fstar_source = generate_fstar(&safe_name, &prog.instructions, &prog.source_locs, &spec_module, &spec_name, &sb_witness);
 
     if verbose {
         eprintln!("--- Generated F* source for {program_name} ---");
