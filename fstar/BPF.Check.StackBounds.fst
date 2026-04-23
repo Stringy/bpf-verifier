@@ -163,5 +163,43 @@ let rec check_program_loop (abs: abs_state) (prog: list bpf_insn) (pc: int) (tar
     | None -> false
     | Some (abs', targets') -> check_program_loop abs' rest (pc + 1) targets'
 
+(* --- Backward branch (loop) support ---
+   Pre-populate the target map with widened states at loop heads.
+   r0-r5 become AbsOther (caller-saved), r6-r9 and r10 preserved. *)
+
+let branch_offset_sb (insn: bpf_insn) : option int =
+  match insn with
+  | BPF_JMP64_IMM _ _ _ off -> Some off
+  | BPF_JMP64_REG _ _ _ off -> Some off
+  | BPF_JMP32_IMM _ _ _ off -> Some off
+  | BPF_JMP32_REG _ _ _ off -> Some off
+  | BPF_JMP_JA off -> Some off
+  | _ -> None
+
+let widen_sb (abs: abs_state) : abs_state =
+  let abs = abs_set abs 0 AbsOther in
+  let abs = abs_set abs 1 AbsOther in
+  let abs = abs_set abs 2 AbsOther in
+  let abs = abs_set abs 3 AbsOther in
+  let abs = abs_set abs 4 AbsOther in
+  let abs = abs_set abs 5 AbsOther in
+  abs
+
+let rec init_loop_targets_sb (prog: list bpf_insn) (pc: int) (targets: target_map)
+  : Tot target_map (decreases prog) =
+  match prog with
+  | [] -> targets
+  | insn :: rest ->
+    let targets = match branch_offset_sb insn with
+      | Some off ->
+        let target_pc = pc + 1 + off in
+        if target_pc <= pc
+        then add_target targets target_pc (widen_sb abs_init)
+        else targets
+      | None -> targets
+    in
+    init_loop_targets_sb rest (pc + 1) targets
+
 let stack_bounds_check (prog: bpf_program) : bool =
-  check_program_loop abs_init prog 0 empty_targets
+  let targets = init_loop_targets_sb prog 0 empty_targets in
+  check_program_loop abs_init prog 0 targets

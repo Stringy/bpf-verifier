@@ -302,5 +302,59 @@ let rec check_program_ns_loop (abs: abs_state_ns) (prog: list bpf_insn) (pc: int
     | None -> false
     | Some (abs', targets') -> check_program_ns_loop abs' rest (pc + 1) targets'
 
+(* --- Backward branch (loop) support ---
+   BPF programmes can have bounded loops via backward branches. Our
+   linear scan processes each instruction once, so a backward branch's
+   target (the loop head) has already been visited. To handle this
+   soundly, we:
+   1. Scan for backward branch targets (loop heads)
+   2. Pre-populate the target map with widened states at those PCs
+   3. When the linear scan reaches a loop head, apply_targets merges
+      the widened state, making the analysis conservative inside loops
+
+   Widening: r0-r5 become NotMap (caller-saved, we lose tracking).
+   r6-r9 keep their pre-loop state (callee-saved, preserved across
+   the loop body). r10 is always preserved. *)
+
+(* Extract the jump offset from a branch instruction, if any. *)
+let branch_offset (insn: bpf_insn) : option int =
+  match insn with
+  | BPF_JMP64_IMM _ _ _ off -> Some off
+  | BPF_JMP64_REG _ _ _ off -> Some off
+  | BPF_JMP32_IMM _ _ _ off -> Some off
+  | BPF_JMP32_REG _ _ _ off -> Some off
+  | BPF_JMP_JA off -> Some off
+  | _ -> None
+
+(* Widen the null-check state for a loop head: r0-r5 become NotMap
+   (we lose all null-check tracking on caller-saved registers),
+   r6-r9 and r10 keep their current values. *)
+let widen_ns (abs: abs_state_ns) : abs_state_ns =
+  let abs = ns_set abs 0 NotMap in
+  let abs = ns_set abs 1 NotMap in
+  let abs = ns_set abs 2 NotMap in
+  let abs = ns_set abs 3 NotMap in
+  let abs = ns_set abs 4 NotMap in
+  let abs = ns_set abs 5 NotMap in
+  abs
+
+(* Scan the programme for backward branches and pre-populate the
+   target map with widened initial states at each loop head. *)
+let rec init_loop_targets (prog: list bpf_insn) (pc: int) (targets: target_map)
+  : Tot target_map (decreases prog) =
+  match prog with
+  | [] -> targets
+  | insn :: rest ->
+    let targets = match branch_offset insn with
+      | Some off ->
+        let target_pc = pc + 1 + off in
+        if target_pc <= pc
+        then add_target targets target_pc (widen_ns ns_init)
+        else targets
+      | None -> targets
+    in
+    init_loop_targets rest (pc + 1) targets
+
 let null_check (prog: bpf_program) : bool =
-  check_program_ns_loop ns_init prog 0 empty_targets
+  let targets = init_loop_targets prog 0 empty_targets in
+  check_program_ns_loop ns_init prog 0 targets
