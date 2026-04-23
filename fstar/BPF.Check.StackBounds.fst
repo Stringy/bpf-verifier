@@ -12,29 +12,21 @@
    conservatively skip the stack bounds check for that instruction (other
    layers handle map pointer and null checks).
 
-   The abstract domain is simple:
+   The analysis is branch-aware: at conditional jumps, we record the current
+   abstract state for the jump target. When execution reaches a branch target,
+   we merge (join) the saved state with the fall-through state. This prevents
+   false positives from stale FramePtr tracking after control flow merges.
+
+   The abstract domain is:
      AbsFramePtr off -- register is r10 (or derived from r10) with known offset
      AbsOther        -- register holds something we don't track here
 
-   This mirrors the concrete FramePtr tracking in BPF.State, but operates
-   purely statically -- no concrete values, no Z3 queries. The check is
-   decidable and runs in O(n) time over the programme.
-
-   Limitations:
-   - Straight-line analysis only. Branches are passed through unchanged;
-     we don't merge abstract states at join points. This is sound for
-     programmes where every path through a branch preserves the same
-     frame pointer relationships (which covers most BPF programmes).
-   - Register-to-register ADD/SUB involving a frame pointer is conservatively
-     set to AbsOther. Only immediate ADD/SUB preserves frame pointer tracking.
-
    F* notes for BPF developers:
    - `option abs_state` is either `Some new_state` (check passed) or `None`
-     (definite out-of-bounds detected).
-   - `Tot` annotation means the function always terminates -- F* proves this.
-   - `decreases prog` tells F* that the recursive function terminates because
-     the list gets shorter on each call.
-*)
+     (definite out-of-bounds detected)
+   - `Tot` means the function always terminates -- F* proves this
+   - `decreases prog` tells F* the recursive function terminates because
+     the list gets shorter on each call *)
 module BPF.Check.StackBounds
 
 open FStar.Mul
@@ -43,7 +35,6 @@ open BPF.State
 open BPF.Semantics
 
 (* --- Abstract register domain ---
-   We only care about frame pointer derivation for this analysis.
    AbsFramePtr off : register is known to be FramePtr with this offset
    AbsOther        : register holds a scalar, map pointer, null, or
                      a frame pointer whose offset we lost track of *)
@@ -56,123 +47,161 @@ type abs_reg =
    reduce abs_get/abs_set via beta-reduction -- no sequences needed. *)
 type abs_state = reg_idx -> abs_reg
 
-(* Look up the abstract value of a register. *)
 let abs_get (abs: abs_state) (r: reg_idx) : abs_reg = abs r
 
-(* Update one register in the abstract state, leaving others unchanged.
-   Returns a new function that maps r to v and everything else to
-   its previous value. *)
 let abs_set (abs: abs_state) (r: reg_idx) (v: abs_reg) : abs_state =
   fun i -> if i = r then v else abs i
 
 (* Initial abstract state at programme entry.
    r10 is the frame pointer with offset 0 (top of stack).
-   All other registers are unknown -- the programme hasn't computed
-   anything yet, so we can't say what they hold. *)
+   All other registers are unknown. *)
 let abs_init : abs_state =
   fun r -> if r = r10 then AbsFramePtr 0 else AbsOther
 
-(* --- Stack bounds check for memory accesses ---
-   Currently always returns true -- we track FramePtr offsets through the
-   abstract state but don't reject any accesses. Our straight-line analysis
-   doesn't merge abstract states at branch join points, so a register's
-   tracked offset can be stale after control flow merges. Rejecting
-   out-of-bounds accesses would cause false positives on valid programmes
-   with complex branching.
+(* --- Branch target tracking ---
+   At conditional jumps, we save the current abstract state for the
+   jump target pc. When the linear scan reaches that pc, we merge
+   the saved state with the fall-through state. This handles control
+   flow joins correctly -- if a register is FramePtr(-4) on one path
+   and AbsOther on another, the merged result is AbsOther.
 
-   Once branch-aware merging is added (like BPF.Check.NullSafety has),
-   this function can check stack_offset_valid and reject genuine
-   out-of-bounds accesses. For now, the abstract state tracking is still
-   useful -- it feeds into the guarded executor's skip-bounds-check
-   optimisation for accesses we CAN verify. *)
-let check_mem_access (_base: abs_reg) (_insn_off: Int32.t) (_w: mem_width) : bool =
-  true
+   We use int for pc because branch offsets can be negative. *)
+type branch_targets = list (int & abs_state)
+
+(* --- Join function for merging abstract register values ---
+   At a branch join point, if both paths agree on a FramePtr offset,
+   keep it. Otherwise, fall back to AbsOther. *)
+let join_reg (a b: abs_reg) : abs_reg =
+  match a, b with
+  | AbsFramePtr x, AbsFramePtr y -> if x = y then AbsFramePtr x else AbsOther
+  | _, _ -> AbsOther
+
+(* Join two full abstract states register-by-register. *)
+let join_states (a b: abs_state) : abs_state =
+  fun r -> join_reg (a r) (b r)
+
+(* Merge all saved branch states targeting this pc into the current state. *)
+let rec merge_targets_at (pc: int) (targets: branch_targets) (acc: abs_state)
+  : Tot abs_state (decreases targets) =
+  match targets with
+  | [] -> acc
+  | (tpc, tstate) :: rest ->
+    if tpc = pc
+    then merge_targets_at pc rest (join_states acc tstate)
+    else merge_targets_at pc rest acc
+
+(* Remove all branch target entries for a given pc. *)
+let rec remove_targets_at (pc: int) (targets: branch_targets)
+  : Tot branch_targets (decreases targets) =
+  match targets with
+  | [] -> []
+  | (tpc, tstate) :: rest ->
+    if tpc = pc
+    then remove_targets_at pc rest
+    else (tpc, tstate) :: remove_targets_at pc rest
+
+(* Merge and clean up in one step. *)
+let apply_targets (abs: abs_state) (pc: int) (targets: branch_targets)
+  : abs_state & branch_targets =
+  let merged = merge_targets_at pc targets abs in
+  let cleaned = remove_targets_at pc targets in
+  (merged, cleaned)
+
+(* --- Stack bounds check for memory accesses ---
+   Given a base register's abstract value and the instruction's offset,
+   check whether the effective stack offset is within [0, 512).
+   Returns true if safe or if the base isn't a known frame pointer. *)
+let check_mem_access (base: abs_reg) (insn_off: Int32.t) (w: mem_width) : bool =
+  match base with
+  | AbsFramePtr ptr_off ->
+    let eff_off = ptr_off + sign_extend_to_int insn_off in
+    stack_offset_valid eff_off w
+  | AbsOther ->
+    true
 
 (* --- Per-instruction abstract transfer function ---
-   Given the current abstract state and one instruction, compute the
-   new abstract state. Returns None if we can prove the instruction
-   would access stack memory out-of-bounds.
+   Takes the current abstract state, one instruction, current pc, and
+   branch targets. Returns the new abstract state and updated targets,
+   or None if a stack bounds violation is detected.
 
-   The transfer function tracks frame pointer derivation through:
-   - MOV reg-to-reg: copies the abstract value
-   - ADD/SUB immediate on a frame pointer: adjusts the offset
-   - All other ALU ops: conservatively set dst to AbsOther
+   At each instruction:
+   1. Merge any branch targets at the current pc
+   2. Apply the instruction's transfer rules
+   3. For conditional branches, record the jump target *)
+let check_insn_sb (abs: abs_state) (insn: bpf_insn) (pc: int) (targets: branch_targets)
+  : option (abs_state & branch_targets) =
 
-   Memory access instructions check bounds before proceeding.
-   Branch instructions pass the abstract state through unchanged. *)
-let check_insn_sb (abs: abs_state) (insn: bpf_insn) : option abs_state =
+  (* Step 1: merge any saved branch states targeting this pc *)
+  let (abs, targets) = apply_targets abs pc targets in
+
   match insn with
 
   (* --- 64-bit ALU, register operands --- *)
   | BPF_ALU64_REG op dst src ->
     (match op with
-     (* MOV copies the abstract value from src to dst *)
-     | MOV -> Some (abs_set abs dst (abs_get abs src))
-     (* All other reg-reg ALU ops destroy frame pointer tracking *)
-     | _ -> Some (abs_set abs dst AbsOther))
+     | MOV -> Some (abs_set abs dst (abs_get abs src), targets)
+     | _ -> Some (abs_set abs dst AbsOther, targets))
 
   (* --- 64-bit ALU, immediate operand --- *)
   | BPF_ALU64_IMM op dst imm ->
     (match op with
-     (* MOV immediate always produces a scalar *)
-     | MOV -> Some (abs_set abs dst AbsOther)
-     (* ADD immediate: if dst is a frame pointer, adjust the offset *)
+     | MOV -> Some (abs_set abs dst AbsOther, targets)
      | ADD ->
        (match abs_get abs dst with
         | AbsFramePtr off ->
-          Some (abs_set abs dst (AbsFramePtr (off + sign_extend_to_int imm)))
-        | AbsOther -> Some (abs_set abs dst AbsOther))
-     (* SUB immediate: if dst is a frame pointer, adjust the offset *)
+          Some (abs_set abs dst (AbsFramePtr (off + sign_extend_to_int imm)), targets)
+        | AbsOther -> Some (abs_set abs dst AbsOther, targets))
      | SUB ->
        (match abs_get abs dst with
         | AbsFramePtr off ->
-          Some (abs_set abs dst (AbsFramePtr (off - sign_extend_to_int imm)))
-        | AbsOther -> Some (abs_set abs dst AbsOther))
-     (* All other IMM ALU ops destroy frame pointer tracking *)
-     | _ -> Some (abs_set abs dst AbsOther))
+          Some (abs_set abs dst (AbsFramePtr (off - sign_extend_to_int imm)), targets)
+        | AbsOther -> Some (abs_set abs dst AbsOther, targets))
+     | _ -> Some (abs_set abs dst AbsOther, targets))
 
-  (* --- 32-bit ALU ops always destroy frame pointer tracking ---
-     Frame pointers are 64-bit; 32-bit truncation makes the pointer invalid. *)
-  | BPF_ALU32_REG _ dst _ -> Some (abs_set abs dst AbsOther)
-  | BPF_ALU32_IMM _ dst _ -> Some (abs_set abs dst AbsOther)
+  (* --- 32-bit ALU ops always destroy frame pointer tracking --- *)
+  | BPF_ALU32_REG _ dst _ -> Some (abs_set abs dst AbsOther, targets)
+  | BPF_ALU32_IMM _ dst _ -> Some (abs_set abs dst AbsOther, targets)
 
   (* --- Load 64-bit immediate: always a scalar --- *)
-  | BPF_LD_IMM64 dst _ -> Some (abs_set abs dst AbsOther)
+  | BPF_LD_IMM64 dst _ -> Some (abs_set abs dst AbsOther, targets)
 
-  (* --- Memory load (LDX): check bounds, then set dst to AbsOther ---
-     The loaded value could be anything, so we lose frame pointer tracking
-     on the destination register. *)
+  (* --- Memory load (LDX): check bounds, then set dst to AbsOther --- *)
   | BPF_LDX w dst src off ->
     if check_mem_access (abs_get abs src) off w
-    then Some (abs_set abs dst AbsOther)
+    then Some (abs_set abs dst AbsOther, targets)
     else None
 
-  (* --- Memory store from register (STX): check bounds, state unchanged ---
-     Stores don't modify registers, so the abstract state passes through. *)
+  (* --- Memory store from register (STX): check bounds, state unchanged --- *)
   | BPF_STX w dst _src off ->
     if check_mem_access (abs_get abs dst) off w
-    then Some abs
+    then Some (abs, targets)
     else None
 
   (* --- Memory store immediate (ST): check bounds, state unchanged --- *)
   | BPF_ST w dst off _imm ->
     if check_mem_access (abs_get abs dst) off w
-    then Some abs
+    then Some (abs, targets)
     else None
 
-  (* --- Branch instructions: pass abstract state through ---
-     We don't track control flow -- this is a straight-line analysis.
-     The abstract state is unchanged by branches. *)
-  | BPF_JMP64_REG _ _ _ _ -> Some abs
-  | BPF_JMP64_IMM _ _ _ _ -> Some abs
-  | BPF_JMP32_REG _ _ _ _ -> Some abs
-  | BPF_JMP32_IMM _ _ _ _ -> Some abs
-  | BPF_JMP_JA _ -> Some abs
+  (* --- Conditional jumps: record branch target for merging --- *)
+  | BPF_JMP64_IMM _ _ _ offset ->
+    let target_pc = pc + 1 + offset in
+    Some (abs, (target_pc, abs) :: targets)
+  | BPF_JMP64_REG _ _ _ offset ->
+    let target_pc = pc + 1 + offset in
+    Some (abs, (target_pc, abs) :: targets)
+  | BPF_JMP32_IMM _ _ _ offset ->
+    let target_pc = pc + 1 + offset in
+    Some (abs, (target_pc, abs) :: targets)
+  | BPF_JMP32_REG _ _ _ offset ->
+    let target_pc = pc + 1 + offset in
+    Some (abs, (target_pc, abs) :: targets)
 
-  (* --- BPF_CALL: clobber caller-saved registers ---
-     The BPF calling convention says r0-r5 are caller-saved.
-     After a helper call, we lose all tracking on r0-r5.
-     r6-r9 are callee-saved and preserved.
+  (* --- Unconditional jump: no fork, pass through --- *)
+  | BPF_JMP_JA _ -> Some (abs, targets)
+
+  (* --- BPF_CALL: clobber caller-saved registers r0-r5 ---
+     r6-r9 are callee-saved and preserve their abstract values.
      r10 (frame pointer) is always preserved. *)
   | BPF_CALL _ ->
     let abs1 = abs_set abs 0 AbsOther in
@@ -181,32 +210,23 @@ let check_insn_sb (abs: abs_state) (insn: bpf_insn) : option abs_state =
     let abs4 = abs_set abs3 3 AbsOther in
     let abs5 = abs_set abs4 4 AbsOther in
     let abs6 = abs_set abs5 5 AbsOther in
-    Some abs6
+    Some (abs6, targets)
 
-  (* --- EXIT: pass through ---
-     Programme is done; nothing to check for stack bounds. *)
-  | BPF_EXIT -> Some abs
+  (* --- EXIT: pass through --- *)
+  | BPF_EXIT -> Some (abs, targets)
 
 (* --- Whole-programme check ---
-   Walk the instruction list front-to-back, threading the abstract state
-   through each instruction. If any instruction fails (returns None),
-   the whole programme fails.
-
-   This is a simple linear scan -- O(n) in programme length. The
-   `decreases prog` annotation proves termination: the list shrinks
-   by one element on each recursive call. *)
-let rec check_program_loop (abs: abs_state) (prog: list bpf_insn)
+   Walk the instruction list front-to-back, threading the abstract
+   state, pc, and branch targets through each instruction. *)
+let rec check_program_loop (abs: abs_state) (prog: list bpf_insn) (pc: int) (targets: branch_targets)
   : Tot bool (decreases prog) =
   match prog with
-  | [] -> true  (* Reached the end without finding an out-of-bounds access *)
+  | [] -> true
   | insn :: rest ->
-    match check_insn_sb abs insn with
-    | None -> false   (* Out-of-bounds stack access detected *)
-    | Some abs' -> check_program_loop abs' rest
+    match check_insn_sb abs insn pc targets with
+    | None -> false
+    | Some (abs', targets') -> check_program_loop abs' rest (pc + 1) targets'
 
-(* Top-level entry point: check a complete BPF programme for stack bounds.
-   Starts with the initial abstract state (r10 = FramePtr 0) and walks
-   every instruction. Returns true if all stack accesses are provably
-   in-bounds, false if any access could be out-of-bounds. *)
+(* Top-level entry point. *)
 let stack_bounds_check (prog: bpf_program) : bool =
-  check_program_loop abs_init prog
+  check_program_loop abs_init prog 0 []
