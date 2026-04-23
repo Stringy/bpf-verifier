@@ -49,18 +49,52 @@ type helper_spec = {
    unknown helpers as undefined behaviour (programme rejected). *)
 let get_helper_spec (hid: helper_id) : option helper_spec =
   match hid with
+  (* Map operations *)
   | MAP_LOOKUP_ELEM ->
     Some { args_used = [r1; r2]; ret_type = RetMapPtr; side_effect = NoEffect }
   | MAP_UPDATE_ELEM ->
     Some { args_used = [r1; r2; r3; r4]; ret_type = RetErrorCode; side_effect = WriteMapValue }
   | MAP_DELETE_ELEM ->
     Some { args_used = [r1; r2]; ret_type = RetErrorCode; side_effect = WriteMapValue }
+  (* Memory read helpers *)
   | PROBE_READ ->
     Some { args_used = [r1; r2; r3]; ret_type = RetErrorCode; side_effect = ReadIntoPtr }
+  | PROBE_READ_STR ->
+    Some { args_used = [r1; r2; r3]; ret_type = RetErrorCode; side_effect = ReadIntoPtr }
+  | PROBE_READ_USER ->
+    Some { args_used = [r1; r2; r3]; ret_type = RetErrorCode; side_effect = ReadIntoPtr }
+  | PROBE_READ_KERNEL ->
+    Some { args_used = [r1; r2; r3]; ret_type = RetErrorCode; side_effect = ReadIntoPtr }
+  | PROBE_READ_KERNEL_STR ->
+    Some { args_used = [r1; r2; r3]; ret_type = RetErrorCode; side_effect = ReadIntoPtr }
+  | D_PATH ->
+    Some { args_used = [r1; r2; r3]; ret_type = RetErrorCode; side_effect = ReadIntoPtr }
+  | GET_CURRENT_COMM ->
+    Some { args_used = [r1; r2]; ret_type = RetErrorCode; side_effect = ReadIntoPtr }
+  (* Simple scalar returns *)
   | KTIME_GET_NS ->
+    Some { args_used = []; ret_type = RetScalar; side_effect = NoEffect }
+  | KTIME_GET_BOOT_NS ->
     Some { args_used = []; ret_type = RetScalar; side_effect = NoEffect }
   | GET_PRANDOM_U32 ->
     Some { args_used = []; ret_type = RetScalar; side_effect = NoEffect }
+  | GET_CURRENT_PID_TGID ->
+    Some { args_used = []; ret_type = RetScalar; side_effect = NoEffect }
+  | GET_CURRENT_UID_GID ->
+    Some { args_used = []; ret_type = RetScalar; side_effect = NoEffect }
+  | GET_CURRENT_TASK ->
+    Some { args_used = []; ret_type = RetScalar; side_effect = NoEffect }
+  | GET_CURRENT_TASK_BTF ->
+    Some { args_used = []; ret_type = RetScalar; side_effect = NoEffect }
+  | TRACE_PRINTK ->
+    Some { args_used = [r1; r2]; ret_type = RetErrorCode; side_effect = NoEffect }
+  (* Ring buffer operations *)
+  | RINGBUF_RESERVE ->
+    Some { args_used = [r1; r2; r3]; ret_type = RetMapPtr; side_effect = NoEffect }
+  | RINGBUF_SUBMIT ->
+    Some { args_used = [r1; r2]; ret_type = RetErrorCode; side_effect = NoEffect }
+  | RINGBUF_DISCARD ->
+    Some { args_used = [r1; r2]; ret_type = RetErrorCode; side_effect = NoEffect }
   | UNKNOWN_HELPER _ -> None
 
 (* Execute a BPF helper call given its specification.

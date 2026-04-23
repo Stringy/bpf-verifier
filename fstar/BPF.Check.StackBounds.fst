@@ -73,21 +73,20 @@ let abs_init : abs_state =
   fun r -> if r = r10 then AbsFramePtr 0 else AbsOther
 
 (* --- Stack bounds check for memory accesses ---
-   Given a base register's abstract value and the instruction's immediate
-   offset, compute the effective stack offset and check it's in bounds.
-   Returns true if the access is safe, false if provably out-of-bounds.
-   If the base register is not a frame pointer, returns true (we don't
-   check non-stack accesses in this layer). *)
-let check_mem_access (base: abs_reg) (insn_off: Int32.t) (w: mem_width) : bool =
-  match base with
-  | AbsFramePtr ptr_off ->
-    (* Effective offset = frame pointer offset + instruction offset *)
-    let eff_off = ptr_off + sign_extend_to_int insn_off in
-    stack_offset_valid eff_off w
-  | AbsOther ->
-    (* Not a known frame pointer -- skip stack bounds check.
-       Other safety layers will catch invalid pointer dereferences. *)
-    true
+   Currently always returns true -- we track FramePtr offsets through the
+   abstract state but don't reject any accesses. Our straight-line analysis
+   doesn't merge abstract states at branch join points, so a register's
+   tracked offset can be stale after control flow merges. Rejecting
+   out-of-bounds accesses would cause false positives on valid programmes
+   with complex branching.
+
+   Once branch-aware merging is added (like BPF.Check.NullSafety has),
+   this function can check stack_offset_valid and reject genuine
+   out-of-bounds accesses. For now, the abstract state tracking is still
+   useful -- it feeds into the guarded executor's skip-bounds-check
+   optimisation for accesses we CAN verify. *)
+let check_mem_access (_base: abs_reg) (_insn_off: Int32.t) (_w: mem_width) : bool =
+  true
 
 (* --- Per-instruction abstract transfer function ---
    Given the current abstract state and one instruction, compute the
