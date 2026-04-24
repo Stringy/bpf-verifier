@@ -146,13 +146,17 @@ type bpf_state = {
   stack: stack_mem;
   map_values: map_value_mem;
   next_map_id: nat;
+  reg_origins: reg_idx -> nat;
 }
 
 let state_get_reg (st: bpf_state) (r: reg_idx) : reg_val =
   get_reg st.regs r
 
 let state_set_reg (st: bpf_state) (r: reg_idx) (v: reg_val) : bpf_state =
-  { st with regs = set_reg st.regs r v; pc = st.pc + 1 }
+  let origin = if st.pc >= 0 then st.pc else 0 in
+  { st with regs = set_reg st.regs r v;
+            pc = st.pc + 1;
+            reg_origins = fun i -> if i = r then origin else st.reg_origins i }
 
 let stack_load (st: bpf_state) (offset: int) (w: mem_width) : option UInt64.t =
   if not (stack_offset_valid offset w) then None

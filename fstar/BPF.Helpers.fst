@@ -107,21 +107,26 @@ let get_helper_spec (hid: helper_id) : option helper_spec =
    because the original exec_insn didn't -- the safety checkers handle
    caller-saved clobbering in their abstract state independently. *)
 let exec_helper (st: bpf_state) (spec: helper_spec) : option bpf_state =
+  let origin = if st.pc >= 0 then st.pc else 0 in
+  let origins' = fun i -> if i = r0 then origin else st.reg_origins i in
   match spec.ret_type with
   | RetMapPtr ->
     let id = st.next_map_id in
     Some { st with
       regs = set_reg st.regs r0 (MapValuePtr id);
       pc = st.pc + 1;
-      next_map_id = id + 1 }
+      next_map_id = id + 1;
+      reg_origins = origins' }
   | RetScalar ->
     Some { st with
       regs = set_reg st.regs r0 (Scalar 0uL);
-      pc = st.pc + 1 }
+      pc = st.pc + 1;
+      reg_origins = origins' }
   | RetErrorCode ->
     Some { st with
       regs = set_reg st.regs r0 (Scalar 0uL);
-      pc = st.pc + 1 }
+      pc = st.pc + 1;
+      reg_origins = origins' }
 
 (* Execute a helper with null safety evidence.
    When null_safe is true and the helper returns RetMapPtr,
@@ -132,6 +137,8 @@ let exec_helper (st: bpf_state) (spec: helper_spec) : option bpf_state =
    Takes a bool rather than safety_evidence to avoid a circular
    dependency -- BPF.Exec.Safe imports us, so we can't import it. *)
 let exec_helper_safe (st: bpf_state) (spec: helper_spec) (null_safe: bool) : option bpf_state =
+  let origin = if st.pc >= 0 then st.pc else 0 in
+  let origins' = fun i -> if i = r0 then origin else st.reg_origins i in
   match spec.ret_type with
   | RetMapPtr ->
     let id = st.next_map_id in
@@ -141,17 +148,21 @@ let exec_helper_safe (st: bpf_state) (spec: helper_spec) (null_safe: bool) : opt
         regs = set_reg st.regs r0 (MapValuePtr id);
         map_values = (id, 0uL) :: st.map_values;
         pc = st.pc + 1;
-        next_map_id = id + 1 }
+        next_map_id = id + 1;
+        reg_origins = origins' }
     else
       Some { st with
         regs = set_reg st.regs r0 (MapValuePtr id);
         pc = st.pc + 1;
-        next_map_id = id + 1 }
+        next_map_id = id + 1;
+        reg_origins = origins' }
   | RetScalar ->
     Some { st with
       regs = set_reg st.regs r0 (Scalar 0uL);
-      pc = st.pc + 1 }
+      pc = st.pc + 1;
+      reg_origins = origins' }
   | RetErrorCode ->
     Some { st with
       regs = set_reg st.regs r0 (Scalar 0uL);
-      pc = st.pc + 1 }
+      pc = st.pc + 1;
+      reg_origins = origins' }

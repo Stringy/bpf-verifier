@@ -146,3 +146,14 @@ let bpf_auto_chunked (block_sizes: list int) : Tac unit =
   norm [nbe; delta; iota; zeta; primops];
   dump "NORMALISED_GOAL";
   smt ()
+
+(* Diagnostic tactic: normalise a trivially-true assertion about r0's
+   origin PC and dump the result. The normaliser evaluates reg_origins r0
+   to a concrete PC number, which appears in the dump output. *)
+(* Phase 1: evaluate execution with zeta (inlines lets for exec_program).
+   Phase 2: dump WITHOUT zeta — preserves `let origin = N` binding.
+   Phase 3: smt proves origin == origin via reflexivity. *)
+let r0_origin_tac () : Tac unit =
+  norm [nbe; delta; iota; zeta; primops];
+  dump "R0_ORIGIN";
+  smt ()

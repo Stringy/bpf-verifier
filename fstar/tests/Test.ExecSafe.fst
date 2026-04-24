@@ -51,6 +51,7 @@ let test_state : bpf_state = {
   stack = [{ offset = -4; width = W32; value = 42uL }];
   map_values = [];
   next_map_id = 0;
+  reg_origins = fun _ -> 0;
 }
 
 (* A valid stack load instruction: LDX W32 r0 r2 0
