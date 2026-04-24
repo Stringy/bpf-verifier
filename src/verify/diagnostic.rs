@@ -169,8 +169,7 @@ pub fn extract_postcondition(spec_content: &str) -> Option<SpecPostcondition> {
             let mut spec_lines = vec![*line];
 
             // Collect lines until we hit a blank line or another `let` definition
-            for j in (i + 1)..lines.len() {
-                let next_line = lines[j];
+            for &next_line in lines.iter().skip(i + 1) {
 
                 // Stop at blank line
                 if next_line.trim().is_empty() {
@@ -204,24 +203,93 @@ pub fn extract_source_locations(generated_source: &str) -> Vec<String> {
 
     for line in generated_source.lines() {
         // Look for (* ... *) comments
-        if let Some(start) = line.find("(*") {
-            if let Some(end) = line[start..].find("*)") {
-                let comment = &line[start + 2..start + end].trim();
+        if let Some(start) = line.find("(*")
+            && let Some(end) = line[start..].find("*)")
+        {
+            let comment = &line[start + 2..start + end].trim();
 
-                // Filter to only file:line format
-                if comment.contains(':') {
-                    let location = comment.to_string();
+            // Filter to only file:line format
+            if comment.contains(':') {
+                let location = comment.to_string();
 
-                    // Deduplicate while preserving order
-                    if seen.insert(location.clone()) {
-                        locations.push(location);
-                    }
+                // Deduplicate while preserving order
+                if seen.insert(location.clone()) {
+                    locations.push(location);
                 }
             }
         }
     }
 
     locations
+}
+
+/// Complete diagnostic information for a verification failure.
+#[derive(Debug)]
+pub struct Diagnostic {
+    pub stage: FailedStage,
+    pub normalised_goal: Option<String>,
+    pub spec_file: Option<String>,
+    pub spec_postcondition: Option<SpecPostcondition>,
+    pub source_locations: Vec<String>,
+}
+
+impl Diagnostic {
+    /// Build a diagnostic from F* output and related source files.
+    pub fn from_fstar_output(
+        stderr: &str,
+        generated_source: &str,
+        spec_file: Option<&str>,
+        spec_content: Option<&str>,
+    ) -> Option<Self> {
+        let stage = parse_failed_stage(stderr)?;
+
+        let dumps = parse_dumps(stderr);
+        let normalised_goal = dumps
+            .iter()
+            .find(|d| d.label == "NORMALISED_GOAL")
+            .map(|d| d.goal.clone());
+
+        let spec_postcondition = spec_content.and_then(extract_postcondition);
+        let source_locations = extract_source_locations(generated_source);
+
+        Some(Diagnostic {
+            stage,
+            normalised_goal,
+            spec_file: spec_file.map(|s| s.to_string()),
+            spec_postcondition,
+            source_locations,
+        })
+    }
+
+    /// Format the diagnostic as a human-readable error message.
+    pub fn format(&self) -> String {
+        let mut output = format!("  {} check failed\n", self.stage);
+
+        if let Some(goal) = &self.normalised_goal {
+            output.push_str("\n  Normalised proof obligation (what F* tried to prove):\n");
+            for line in goal.lines() {
+                output.push_str(&format!("    {}\n", line));
+            }
+        }
+
+        if let Some(spec_file) = &self.spec_file
+            && let Some(postcond) = &self.spec_postcondition
+        {
+            output.push_str(&format!("\n  Spec ({}:{}):\n", spec_file, postcond.start_line));
+            for line in postcond.text.lines() {
+                output.push_str(&format!("    {}\n", line));
+            }
+        }
+
+        if !self.source_locations.is_empty() {
+            output.push_str("\n  BPF source locations:\n");
+            for loc in &self.source_locations {
+                output.push_str(&format!("    {}\n", loc));
+            }
+        }
+
+        output
+    }
 }
 
 #[cfg(test)]
@@ -378,5 +446,54 @@ let spec : bpf_spec =
         assert_eq!(locs.len(), 5);
         assert_eq!(locs[0], "BranchResult.bpf.c:13");
         assert_eq!(locs[4], "BranchResult.bpf.c:19");
+    }
+
+    #[test]
+    fn format_functional_failure_diagnostic() {
+        let diag = Diagnostic {
+            stage: FailedStage::FunctionalCorrectness,
+            normalised_goal: Some("squash (forall (init: bpf_state).\n        l_True ==> Scalar 1uL == Scalar 0uL \\/ Scalar 1uL == Scalar 5uL)".to_string()),
+            spec_file: Some("BranchResult.fst".to_string()),
+            spec_postcondition: Some(SpecPostcondition {
+                start_line: 10,
+                text: "let spec : bpf_spec =\n  post_only (fun final_st ->\n    state_get_reg final_st r0 == Scalar 0uL \\/\n    state_get_reg final_st r0 == Scalar 5uL\n  )".to_string(),
+            }),
+            source_locations: vec![
+                "BranchResult.bpf.c:15".to_string(),
+                "BranchResult.bpf.c:16".to_string(),
+                "BranchResult.bpf.c:19".to_string(),
+            ],
+        };
+        let output = diag.format();
+        assert!(output.contains("functional correctness"));
+        assert!(output.contains("Scalar 1uL == Scalar 0uL"));
+        assert!(output.contains("BranchResult.fst:10"));
+        assert!(output.contains("BranchResult.bpf.c:15"));
+    }
+
+    #[test]
+    fn build_diagnostic_from_fstar_output() {
+        let stderr = concat!(
+            "proof-state: State dump @ depth 0 (NORMALISED_GOAL):\n",
+            "Location: Verify_test.fst(61,2-61,35)\n",
+            "Goal 1/1\n",
+            "\n",
+            "  |-\n",
+            "  _\n",
+            "  :\n",
+            "  squash (Scalar 1uL == Scalar 5uL)\n",
+            "\n",
+            r#"{"msg":["Assertion failed"],"level":"Error","number":19,"ctx":["While typechecking the top-level declaration `let proof`"]}"#,
+            "\n",
+        );
+        let generated = "BPF_EXIT  (* test.bpf.c:10 *)";
+        let spec = "module T\nopen BPF.Spec\nlet spec : bpf_spec =\n  returns_value 5uL\n";
+
+        let diag = Diagnostic::from_fstar_output(stderr, generated, Some("T.fst"), Some(spec));
+        assert!(diag.is_some());
+        let diag = diag.unwrap();
+        assert_eq!(diag.stage, FailedStage::FunctionalCorrectness);
+        assert!(diag.normalised_goal.unwrap().contains("Scalar 1uL"));
+        assert_eq!(diag.source_locations, vec!["test.bpf.c:10"]);
     }
 }
