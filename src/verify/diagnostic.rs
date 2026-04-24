@@ -79,6 +79,76 @@ fn extract_dump_label(line: &str) -> Option<String> {
         })
 }
 
+/// Represents which proof stage failed during F* verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailedStage {
+    StackBounds,
+    TypeSafety,
+    NullSafety,
+    FunctionalCorrectness,
+}
+
+impl std::fmt::Display for FailedStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FailedStage::StackBounds => write!(f, "stack bounds safety"),
+            FailedStage::TypeSafety => write!(f, "type safety"),
+            FailedStage::NullSafety => write!(f, "null safety"),
+            FailedStage::FunctionalCorrectness => write!(f, "functional correctness"),
+        }
+    }
+}
+
+/// Parse F* stderr output to determine which proof stage failed.
+///
+/// F* with --message_format json emits one JSON object per line on stderr for
+/// errors/warnings. The ctx field contains context about which declaration failed.
+pub fn parse_failed_stage(stderr: &str) -> Option<FailedStage> {
+    for line in stderr.lines() {
+        // Skip non-JSON lines (like dump blocks)
+        if !line.starts_with('{') {
+            continue;
+        }
+
+        // Try to parse as JSON
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+
+        // Only process Error-level messages
+        if json.get("level").and_then(|v| v.as_str()) != Some("Error") {
+            continue;
+        }
+
+        // Check the ctx array for declaration context
+        let Some(ctx) = json.get("ctx").and_then(|v| v.as_array()) else {
+            continue;
+        };
+
+        for ctx_item in ctx {
+            let Some(ctx_str) = ctx_item.as_str() else {
+                continue;
+            };
+
+            // Match against known proof declarations
+            if ctx_str.contains("`let proof`") {
+                return Some(FailedStage::FunctionalCorrectness);
+            }
+            if ctx_str.contains("`let ts_proof`") {
+                return Some(FailedStage::TypeSafety);
+            }
+            if ctx_str.contains("`let ns_proof`") {
+                return Some(FailedStage::NullSafety);
+            }
+            if ctx_str.contains("`let sb_proof`") || ctx_str.contains("assert_norm") {
+                return Some(FailedStage::StackBounds);
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +207,62 @@ Goal 1/1
         assert_eq!(dumps[2].label, "NORMALISED_GOAL");
         assert!(dumps[0].goal.contains("true == true"));
         assert!(dumps[2].goal.contains("Scalar 1uL"));
+    }
+
+    #[test]
+    fn identify_failed_proof_from_json() {
+        let stderr = r#"{"msg":["Assertion failed"],"level":"Error","number":19,"range":{"def":{"file_name":"/tmp/Verify_test.fst","start_pos":{"line":61,"col":2},"end_pos":{"line":61,"col":35}},"use":{"file_name":"/tmp/Verify_test.fst","start_pos":{"line":61,"col":2},"end_pos":{"line":61,"col":3}}},"number":19,"ctx":["While synthesizing term with a tactic","While typechecking the top-level declaration `let proof`"]}"#;
+        let stage = parse_failed_stage(stderr);
+        assert_eq!(stage, Some(FailedStage::FunctionalCorrectness));
+    }
+
+    #[test]
+    fn identify_type_safety_failure() {
+        let stderr = r#"{"msg":["tactic failed"],"level":"Error","number":228,"ctx":["While typechecking the top-level declaration `let ts_proof`"]}"#;
+        let stage = parse_failed_stage(stderr);
+        assert_eq!(stage, Some(FailedStage::TypeSafety));
+    }
+
+    #[test]
+    fn identify_null_safety_failure() {
+        let stderr = r#"{"msg":["tactic failed"],"level":"Error","number":228,"ctx":["While typechecking the top-level declaration `let ns_proof`"]}"#;
+        let stage = parse_failed_stage(stderr);
+        assert_eq!(stage, Some(FailedStage::NullSafety));
+    }
+
+    #[test]
+    fn identify_stack_bounds_failure() {
+        let stderr = r#"{"msg":["tactic failed"],"level":"Error","number":228,"ctx":["While typechecking the top-level declaration `let sb_proof`"]}"#;
+        let stage = parse_failed_stage(stderr);
+        assert_eq!(stage, Some(FailedStage::StackBounds));
+    }
+
+    #[test]
+    fn parse_mixed_json_and_dumps() {
+        let stderr = r#"proof-state: State dump @ depth 0 (NORMALISED_GOAL):
+Location: Verify_test.fst(61,2-61,35)
+Goal 1/1
+
+  |- _ : squash (true == true)
+
+{"msg":["Assertion failed"],"level":"Error","number":19,"ctx":["While synthesizing term with a tactic","While typechecking the top-level declaration `let proof`"]}
+"#;
+        let stage = parse_failed_stage(stderr);
+        assert_eq!(stage, Some(FailedStage::FunctionalCorrectness));
+    }
+
+    #[test]
+    fn ignore_warnings() {
+        let stderr = r#"{"msg":["Deprecated"],"level":"Warning","ctx":["While typechecking the top-level declaration `let proof`"]}"#;
+        let stage = parse_failed_stage(stderr);
+        assert_eq!(stage, None);
+    }
+
+    #[test]
+    fn failed_stage_display() {
+        assert_eq!(FailedStage::StackBounds.to_string(), "stack bounds safety");
+        assert_eq!(FailedStage::TypeSafety.to_string(), "type safety");
+        assert_eq!(FailedStage::NullSafety.to_string(), "null safety");
+        assert_eq!(FailedStage::FunctionalCorrectness.to_string(), "functional correctness");
     }
 }

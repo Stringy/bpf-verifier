@@ -196,6 +196,7 @@ dependencies = [
  "clap",
  "datatest-stable",
  "object 0.36.7",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

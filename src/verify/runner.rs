@@ -56,6 +56,7 @@ impl FstarRunner {
         }
 
         cmd.args(["--fuel", "8", "--ifuel", "2", "--z3rlimit", "30"]);
+        cmd.args(["--message_format", "json"]);
         cmd.arg(fstar_file);
 
         let output = cmd.output().map_err(VerifyError::FstarInvocation)?;
