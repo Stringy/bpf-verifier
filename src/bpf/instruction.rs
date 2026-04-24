@@ -379,31 +379,10 @@ impl BpfInsn {
                 format!("BPF_JMP_JA ({})", self.offset)
             }
             Opcode::Call => {
-                let helper = match self.imm {
-                    1 => "MAP_LOOKUP_ELEM",
-                    2 => "MAP_UPDATE_ELEM",
-                    3 => "MAP_DELETE_ELEM",
-                    4 => "PROBE_READ",
-                    5 => "KTIME_GET_NS",
-                    6 => "TRACE_PRINTK",
-                    7 => "GET_PRANDOM_U32",
-                    14 => "GET_CURRENT_PID_TGID",
-                    15 => "GET_CURRENT_UID_GID",
-                    16 => "GET_CURRENT_COMM",
-                    35 => "GET_CURRENT_TASK",
-                    45 => "PROBE_READ_STR",
-                    112 => "PROBE_READ_USER",
-                    113 => "PROBE_READ_KERNEL",
-                    115 => "PROBE_READ_KERNEL_STR",
-                    125 => "KTIME_GET_BOOT_NS",
-                    131 => "RINGBUF_RESERVE",
-                    132 => "RINGBUF_SUBMIT",
-                    133 => "RINGBUF_DISCARD",
-                    147 => "D_PATH",
-                    158 => "GET_CURRENT_TASK_BTF",
-                    _ => return format!("BPF_CALL (UNKNOWN_HELPER {})", self.imm),
-                };
-                format!("BPF_CALL {helper}")
+                match super::helpers::get_helper(self.imm) {
+                    Some(spec) => format!("BPF_CALL {}", spec.name),
+                    None => format!("BPF_CALL (UNKNOWN_HELPER {})", self.imm),
+                }
             }
             Opcode::LdImm64 => {
                 let val = self.imm64.unwrap_or(self.imm as u32 as u64);

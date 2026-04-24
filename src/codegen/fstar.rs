@@ -30,7 +30,9 @@ pub fn generate_fstar(
     sb_witness: &AnalysisResult,
 ) -> String {
     let hints = generate_bitwise_hints(instructions);
-    let has_map_calls = instructions.iter().any(|i| matches!(i.opcode, Opcode::Call));
+    let has_map_calls = instructions.iter().any(|i| {
+        matches!(i.opcode, Opcode::Call) && crate::bpf::helpers::returns_map_ptr(i.imm)
+    });
     let blocks = find_basic_blocks(instructions);
     let block_sizes: Vec<usize> = blocks.iter().map(|b| b.len()).collect();
     let sb_witness_steps: Vec<String> = sb_witness.steps.iter()
