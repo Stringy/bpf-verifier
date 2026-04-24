@@ -75,12 +75,22 @@ fn build_fstar_cache(fstar_dir: &Path, cache_dir: &Path) {
         "BPF.Tactic.Layered",
     ];
 
+    let mut must_rebuild = false;
     for module in modules {
         let fst_file = fstar_dir.join(format!("{module}.fst"));
         let checked_file = cache_dir.join(format!("{module}.fst.checked"));
-        if checked_file.exists() {
+
+        if !must_rebuild
+            && let Ok(src_meta) = fs::metadata(&fst_file)
+            && let Ok(cache_meta) = fs::metadata(&checked_file)
+            && let Ok(src_time) = src_meta.modified()
+            && let Ok(cache_time) = cache_meta.modified()
+            && src_time <= cache_time
+        {
             continue;
         }
+        must_rebuild = true;
+        let _ = fs::remove_file(&checked_file);
 
         let status = Command::new(&fstar)
             .arg("--include").arg(fstar_dir)
