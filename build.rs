@@ -49,97 +49,13 @@ fn compile_corpus(corpus_dir: &Path, out_dir: &Path) {
     }
 }
 
-fn build_fstar_cache(fstar_dir: &Path, cache_dir: &Path) {
-    let fstar = which("fstar.exe");
-    let Some(fstar) = fstar else {
-        eprintln!("warning: fstar.exe not found, skipping checked file cache");
-        return;
-    };
-
-    fs::create_dir_all(cache_dir).expect("failed to create F* cache directory");
-
-    // Modules in dependency order
-    let modules = [
-        "BPF.State",
-        "BPF.Helpers",
-        "BPF.Semantics",
-        "BPF.Spec",
-        "BPF.Verify",
-        "BPF.Witness",
-        "BPF.DefaultSpec",
-        "BPF.Check.StackBounds",
-        "BPF.Check.TypeSafety",
-        "BPF.Check.NullSafety",
-        "BPF.Exec.Safe",
-        "BPF.Tactic",
-        "BPF.Tactic.Layered",
-    ];
-
-    let mut must_rebuild = false;
-    for module in modules {
-        let fst_file = fstar_dir.join(format!("{module}.fst"));
-        let checked_file = cache_dir.join(format!("{module}.fst.checked"));
-
-        if !must_rebuild
-            && let Ok(src_meta) = fs::metadata(&fst_file)
-            && let Ok(cache_meta) = fs::metadata(&checked_file)
-            && let Ok(src_time) = src_meta.modified()
-            && let Ok(cache_time) = cache_meta.modified()
-            && src_time <= cache_time
-        {
-            continue;
-        }
-        must_rebuild = true;
-        let _ = fs::remove_file(&checked_file);
-
-        let status = Command::new(&fstar)
-            .arg("--include").arg(fstar_dir)
-            .arg("--cache_checked_modules")
-            .arg("--cache_dir").arg(cache_dir)
-            .arg(&fst_file)
-            .status();
-
-        match status {
-            Ok(s) if s.success() => {}
-            Ok(_) => {
-                eprintln!("warning: F* failed to check {module}, cache may be incomplete");
-                break;
-            }
-            Err(e) => {
-                eprintln!("warning: failed to invoke F*: {e}");
-                break;
-            }
-        }
-    }
-}
-
-fn which(name: &str) -> Option<PathBuf> {
-    let output = Command::new("which").arg(name).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let path = String::from_utf8_lossy(&output.stdout);
-    let path = path.trim();
-    if path.is_empty() { None } else { Some(PathBuf::from(path)) }
-}
-
 fn main() {
-    let out_dir_base = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
-    let corpus_out = out_dir_base.join("corpus");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set")).join("corpus");
     let corpus_dir = PathBuf::from("tests/corpus");
 
     if corpus_dir.exists() {
-        compile_corpus(&corpus_dir, &corpus_out);
-    }
-
-    let fstar_dir = PathBuf::from("fstar");
-    let cache_dir = fstar_dir.join(".cache");
-    if fstar_dir.exists() {
-        build_fstar_cache(&fstar_dir, &cache_dir);
+        compile_corpus(&corpus_dir, &out_dir);
     }
 
     println!("cargo::rerun-if-changed=tests/corpus");
-    println!("cargo::rerun-if-changed=fstar");
-    // When the cache dir doesn't exist, this triggers a rebuild
-    println!("cargo::rerun-if-changed={}", cache_dir.display());
 }

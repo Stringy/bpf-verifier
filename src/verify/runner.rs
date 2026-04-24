@@ -89,9 +89,9 @@ impl FstarRunner {
 
 const REQUIRED_CHECKED_MODULES: &[&str] = &[
     "BPF.State", "BPF.Helpers", "BPF.Semantics", "BPF.Spec",
-    "BPF.Verify", "BPF.Witness", "BPF.DefaultSpec",
+    "BPF.Verify", "BPF.DefaultSpec",
     "BPF.Check.StackBounds", "BPF.Check.TypeSafety", "BPF.Check.NullSafety",
-    "BPF.Exec.Safe", "BPF.Tactic", "BPF.Tactic.Layered",
+    "BPF.Witness", "BPF.Exec.Safe", "BPF.Tactic", "BPF.Tactic.Layered",
 ];
 
 fn cache_complete(cache_dir: &Path) -> bool {
