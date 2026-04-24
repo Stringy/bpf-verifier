@@ -147,6 +147,21 @@ pub fn parse_failed_stage(stderr: &str) -> Option<FailedStage> {
         }
     }
 
+    // Fallback: if we found dump blocks but no JSON errors, infer from
+    // the last dump label before the error
+    let dumps = parse_dumps(stderr);
+    if stderr.contains("Error") || stderr.contains("Assertion failed") {
+        if let Some(last) = dumps.last() {
+            return match last.label.as_str() {
+                "NORMALISED_GOAL" => Some(FailedStage::FunctionalCorrectness),
+                "STACK_BOUNDS_GOAL" => Some(FailedStage::StackBounds),
+                "TYPE_SAFETY_GOAL" => Some(FailedStage::TypeSafety),
+                "NULL_SAFETY_GOAL" => Some(FailedStage::NullSafety),
+                _ => None,
+            };
+        }
+    }
+
     None
 }
 
@@ -496,5 +511,31 @@ let spec : bpf_spec =
         assert_eq!(diag.stage, FailedStage::FunctionalCorrectness);
         assert!(diag.normalised_goal.unwrap().contains("Scalar 1uL"));
         assert_eq!(diag.source_locations, vec!["test.bpf.c:10"]);
+    }
+
+    #[test]
+    fn fallback_to_dump_labels() {
+        let stderr = concat!(
+            "proof-state: State dump @ depth 0 (NORMALISED_GOAL):\n",
+            "Location: Verify_test.fst(61,2-61,35)\n",
+            "Goal 1/1\n",
+            "\n",
+            "  |-\n",
+            "  _\n",
+            "  :\n",
+            "  squash (Scalar 1uL == Scalar 5uL)\n",
+            "\n",
+            "* Error 19 at /tmp/Verify_test.fst(61,2-61,3):\n",
+            "  - Assertion failed\n",
+        );
+        let stage = parse_failed_stage(stderr);
+        assert_eq!(stage, Some(FailedStage::FunctionalCorrectness));
+    }
+
+    #[test]
+    fn fallback_no_dumps_no_json() {
+        let stderr = "some random output\n";
+        let stage = parse_failed_stage(stderr);
+        assert_eq!(stage, None);
     }
 }
