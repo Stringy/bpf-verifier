@@ -25,10 +25,11 @@ pub fn parse_dumps(stderr: &str) -> Vec<DumpBlock> {
             while i < lines.len() {
                 let current = lines[i];
 
-                // Stop if we hit the next dump or an error
+                // Stop if we hit the next dump, an F* error, or a JSON message
                 if current.starts_with("proof-state: State dump")
                     || current.starts_with("* Error")
-                    || current.starts_with("* Warning") {
+                    || current.starts_with("* Warning")
+                    || current.starts_with('{') {
                     break;
                 }
 

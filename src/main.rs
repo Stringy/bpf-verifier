@@ -6,6 +6,7 @@ use clap::Parser;
 use bpf_verifier::analysis::stack_bounds;
 use bpf_verifier::codegen::fstar::generate_fstar;
 use bpf_verifier::elf::parser::{parse_elf, BpfProgram};
+use bpf_verifier::verify::diagnostic::Diagnostic;
 use bpf_verifier::verify::runner::{FstarRunner, VerifyResult};
 
 #[derive(Parser)]
@@ -347,6 +348,21 @@ fn verify_program(
             if verbose {
                 eprintln!("{message}");
             }
+
+            let spec_content = spec_path.and_then(|p| std::fs::read_to_string(p).ok());
+            let spec_filename = spec_path
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str());
+
+            if let Some(diag) = Diagnostic::from_fstar_output(
+                &message,
+                &fstar_source,
+                spec_filename,
+                spec_content.as_deref(),
+            ) {
+                eprint!("{}", diag.format());
+            }
+
             Ok(false)
         }
         Err(e) => Err(format!("{e}")),

@@ -66,11 +66,7 @@ impl FstarRunner {
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let message = if !stderr.is_empty() {
-                stderr.into_owned()
-            } else {
-                stdout.into_owned()
-            };
+            let message = format!("{stdout}\n{stderr}");
             Ok(VerifyResult::Fail { message })
         }
     }
