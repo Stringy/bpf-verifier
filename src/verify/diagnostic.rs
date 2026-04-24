@@ -150,16 +150,16 @@ pub fn parse_failed_stage(stderr: &str) -> Option<FailedStage> {
     // Fallback: if we found dump blocks but no JSON errors, infer from
     // the last dump label before the error
     let dumps = parse_dumps(stderr);
-    if stderr.contains("Error") || stderr.contains("Assertion failed") {
-        if let Some(last) = dumps.last() {
-            return match last.label.as_str() {
-                "NORMALISED_GOAL" => Some(FailedStage::FunctionalCorrectness),
-                "STACK_BOUNDS_GOAL" => Some(FailedStage::StackBounds),
-                "TYPE_SAFETY_GOAL" => Some(FailedStage::TypeSafety),
-                "NULL_SAFETY_GOAL" => Some(FailedStage::NullSafety),
-                _ => None,
-            };
-        }
+    if (stderr.contains("Error") || stderr.contains("Assertion failed"))
+        && let Some(last) = dumps.last()
+    {
+        return match last.label.as_str() {
+            "NORMALISED_GOAL" => Some(FailedStage::FunctionalCorrectness),
+            "STACK_BOUNDS_GOAL" => Some(FailedStage::StackBounds),
+            "TYPE_SAFETY_GOAL" => Some(FailedStage::TypeSafety),
+            "NULL_SAFETY_GOAL" => Some(FailedStage::NullSafety),
+            _ => None,
+        };
     }
 
     None
