@@ -239,11 +239,68 @@ pub fn extract_source_locations(generated_source: &str) -> Vec<String> {
     locations
 }
 
+/// An instruction from the generated F* source with its PC and source location.
+#[derive(Debug, Clone)]
+pub struct InstructionInfo {
+    pub pc: usize,
+    pub instruction: String,
+    pub source_loc: Option<String>,
+}
+
+/// Extract the r0 origin PC from the R0_ORIGIN dump block.
+///
+/// The dump goal contains `N == N` where N is the PC number,
+/// possibly wrapped in `squash (forall ... . N == N)`.
+pub fn extract_r0_origin(dumps: &[DumpBlock]) -> Option<usize> {
+    let dump = dumps.iter().find(|d| d.label == "R0_ORIGIN")?;
+    let goal = dump.goal.trim();
+    let eq_pos = goal.rfind(" == ")?;
+    let after_eq = goal[eq_pos + 4..].trim().trim_end_matches(')');
+    after_eq.trim().parse().ok()
+}
+
+/// Extract instruction info at a given PC from the generated F* source.
+///
+/// The instruction list in the generated source has the form:
+///   BPF_ALU32_IMM MOV r0 (1l)  (* BranchResult.bpf.c:17 *);
+/// Each line corresponds to a PC (0-indexed from the first instruction).
+pub fn extract_instruction_at_pc(generated_source: &str, pc: usize) -> Option<InstructionInfo> {
+    let mut current_pc = 0;
+    for line in generated_source.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("BPF_") {
+            continue;
+        }
+
+        if current_pc == pc {
+            let (insn, loc) = if let Some(start) = trimmed.find("(* ")
+                && let Some(end) = trimmed.rfind(" *)")
+                && end > start
+            {
+                let insn = trimmed[..start].trim().trim_end_matches(';').trim();
+                let loc = trimmed[start + 3..end].trim();
+                (insn.to_string(), Some(loc.to_string()))
+            } else {
+                let insn = trimmed.trim_end_matches(';').trim();
+                (insn.to_string(), None)
+            };
+            return Some(InstructionInfo {
+                pc,
+                instruction: insn,
+                source_loc: loc,
+            });
+        }
+        current_pc += 1;
+    }
+    None
+}
+
 /// Complete diagnostic information for a verification failure.
 #[derive(Debug)]
 pub struct Diagnostic {
     pub stage: FailedStage,
     pub normalised_goal: Option<String>,
+    pub r0_origin: Option<InstructionInfo>,
     pub spec_file: Option<String>,
     pub spec_postcondition: Option<SpecPostcondition>,
     pub source_locations: Vec<String>,
@@ -265,12 +322,16 @@ impl Diagnostic {
             .find(|d| d.label == "NORMALISED_GOAL")
             .map(|d| d.goal.clone());
 
+        let r0_origin = extract_r0_origin(&dumps)
+            .and_then(|pc| extract_instruction_at_pc(generated_source, pc));
+
         let spec_postcondition = spec_content.and_then(extract_postcondition);
         let source_locations = extract_source_locations(generated_source);
 
         Some(Diagnostic {
             stage,
             normalised_goal,
+            r0_origin,
             spec_file: spec_file.map(|s| s.to_string()),
             spec_postcondition,
             source_locations,
@@ -280,6 +341,15 @@ impl Diagnostic {
     /// Format the diagnostic as a human-readable error message.
     pub fn format(&self) -> String {
         let mut output = format!("  {} check failed\n", self.stage);
+
+        if let Some(origin) = &self.r0_origin {
+            output.push_str(&format!(
+                "\n  r0 set by instruction {} ({})\n",
+                origin.pc,
+                origin.source_loc.as_deref().unwrap_or("no source location"),
+            ));
+            output.push_str(&format!("    {}\n", origin.instruction));
+        }
 
         if let Some(goal) = &self.normalised_goal {
             output.push_str("\n  Normalised proof obligation (what F* tried to prove):\n");
@@ -294,13 +364,6 @@ impl Diagnostic {
             output.push_str(&format!("\n  Spec ({}:{}):\n", spec_file, postcond.start_line));
             for line in postcond.text.lines() {
                 output.push_str(&format!("    {}\n", line));
-            }
-        }
-
-        if !self.source_locations.is_empty() {
-            output.push_str("\n  BPF source locations:\n");
-            for loc in &self.source_locations {
-                output.push_str(&format!("    {}\n", loc));
             }
         }
 
@@ -465,31 +528,68 @@ let spec : bpf_spec =
     }
 
     #[test]
+    fn extract_r0_origin_from_dumps() {
+        let dumps = vec![
+            DumpBlock { label: "R0_ORIGIN".to_string(), goal: "7 == 7".to_string() },
+            DumpBlock { label: "NORMALISED_GOAL".to_string(), goal: "something".to_string() },
+        ];
+        assert_eq!(extract_r0_origin(&dumps), Some(7));
+    }
+
+    #[test]
+    fn extract_instruction_at_pc_with_source() {
+        let generated = concat!(
+            "let program : bpf_program = [\n",
+            "  BPF_ALU32_IMM MOV r1 (0l)  (* test.bpf.c:13 *);\n",
+            "  BPF_STX W32 r10 r1 (-4l)  (* test.bpf.c:14 *);\n",
+            "  BPF_ALU32_IMM MOV r0 (1l);\n",
+            "  BPF_EXIT  (* test.bpf.c:19 *)\n",
+            "]\n",
+        );
+        let info = extract_instruction_at_pc(generated, 2).unwrap();
+        assert_eq!(info.pc, 2);
+        assert_eq!(info.instruction, "BPF_ALU32_IMM MOV r0 (1l)");
+        assert!(info.source_loc.is_none());
+
+        let info = extract_instruction_at_pc(generated, 0).unwrap();
+        assert_eq!(info.source_loc.as_deref(), Some("test.bpf.c:13"));
+    }
+
+    #[test]
     fn format_functional_failure_diagnostic() {
         let diag = Diagnostic {
             stage: FailedStage::FunctionalCorrectness,
             normalised_goal: Some("squash (forall (init: bpf_state).\n        l_True ==> Scalar 1uL == Scalar 0uL \\/ Scalar 1uL == Scalar 5uL)".to_string()),
+            r0_origin: Some(InstructionInfo {
+                pc: 7,
+                instruction: "BPF_ALU32_IMM MOV r0 (1l)".to_string(),
+                source_loc: Some("BranchResult.bpf.c:17".to_string()),
+            }),
             spec_file: Some("BranchResult.fst".to_string()),
             spec_postcondition: Some(SpecPostcondition {
                 start_line: 10,
                 text: "let spec : bpf_spec =\n  post_only (fun final_st ->\n    state_get_reg final_st r0 == Scalar 0uL \\/\n    state_get_reg final_st r0 == Scalar 5uL\n  )".to_string(),
             }),
-            source_locations: vec![
-                "BranchResult.bpf.c:15".to_string(),
-                "BranchResult.bpf.c:16".to_string(),
-                "BranchResult.bpf.c:19".to_string(),
-            ],
+            source_locations: vec![],
         };
         let output = diag.format();
         assert!(output.contains("functional correctness"));
+        assert!(output.contains("instruction 7"));
+        assert!(output.contains("BranchResult.bpf.c:17"));
+        assert!(output.contains("BPF_ALU32_IMM MOV r0 (1l)"));
         assert!(output.contains("Scalar 1uL == Scalar 0uL"));
         assert!(output.contains("BranchResult.fst:10"));
-        assert!(output.contains("BranchResult.bpf.c:15"));
     }
 
     #[test]
     fn build_diagnostic_from_fstar_output() {
         let stderr = concat!(
+            "proof-state: State dump @ depth 0 (R0_ORIGIN):\n",
+            "Location: Verify_test.fst(42,2-42,25)\n",
+            "Goal 1/1\n",
+            "\n",
+            "  |- _ : squash (forall (init: bpf_state). 3 == 3)\n",
+            "\n",
             "proof-state: State dump @ depth 0 (NORMALISED_GOAL):\n",
             "Location: Verify_test.fst(61,2-61,35)\n",
             "Goal 1/1\n",
@@ -502,15 +602,23 @@ let spec : bpf_spec =
             r#"{"msg":["Assertion failed"],"level":"Error","number":19,"ctx":["While typechecking the top-level declaration `let proof`"]}"#,
             "\n",
         );
-        let generated = "BPF_EXIT  (* test.bpf.c:10 *)";
+        let generated = concat!(
+            "  BPF_ALU32_IMM MOV r1 (0l);\n",
+            "  BPF_STX W32 r10 r1 (-4l);\n",
+            "  BPF_ALU64_REG MOV r2 r10;\n",
+            "  BPF_ALU32_IMM MOV r0 (1l)  (* test.bpf.c:5 *);\n",
+            "  BPF_EXIT  (* test.bpf.c:10 *)\n",
+        );
         let spec = "module T\nopen BPF.Spec\nlet spec : bpf_spec =\n  returns_value 5uL\n";
 
         let diag = Diagnostic::from_fstar_output(stderr, generated, Some("T.fst"), Some(spec));
         assert!(diag.is_some());
         let diag = diag.unwrap();
         assert_eq!(diag.stage, FailedStage::FunctionalCorrectness);
-        assert!(diag.normalised_goal.unwrap().contains("Scalar 1uL"));
-        assert_eq!(diag.source_locations, vec!["test.bpf.c:10"]);
+        assert!(diag.normalised_goal.as_ref().unwrap().contains("Scalar 1uL"));
+        let origin = diag.r0_origin.as_ref().unwrap();
+        assert_eq!(origin.pc, 3);
+        assert_eq!(origin.source_loc.as_deref(), Some("test.bpf.c:5"));
     }
 
     #[test]
