@@ -335,12 +335,14 @@ fn verify_program(
     }
 
     let include_dirs = vec![project_root.join("fstar"), tmp_dir.path().to_path_buf()];
+    let cache_dir = project_root.join("fstar/.cache");
     let runner = if let Some(override_path) = fstar_path_override {
         FstarRunner::new(override_path.to_path_buf(), include_dirs)
     } else {
         FstarRunner::find_fstar(project_root, include_dirs)
             .map_err(|e| format!("{e}"))?
-    };
+    }
+    .with_cache(cache_dir);
 
     match runner.verify(&fst_path) {
         Ok(VerifyResult::Pass) => Ok(true),

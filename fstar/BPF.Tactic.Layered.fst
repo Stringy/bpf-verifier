@@ -141,7 +141,7 @@ let rec norm_steps (count: nat) : Tac unit =
 
 (* Chunked functional proof: normalise block-by-block, then finish
    with full normalisation and SMT. *)
-let bpf_auto_chunked (block_sizes: list int) : Tac unit =
+let bpf_auto_chunked (block_sizes: list nat) : Tac unit =
   iter (fun size -> norm_steps size) block_sizes;
   norm [nbe; delta; iota; zeta; primops];
   dump "NORMALISED_GOAL";

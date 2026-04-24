@@ -22,6 +22,7 @@ pub enum VerifyResult {
 pub struct FstarRunner {
     fstar_path: PathBuf,
     include_dirs: Vec<PathBuf>,
+    cache_dir: Option<PathBuf>,
 }
 
 impl FstarRunner {
@@ -29,7 +30,15 @@ impl FstarRunner {
         Self {
             fstar_path,
             include_dirs,
+            cache_dir: None,
         }
+    }
+
+    pub fn with_cache(mut self, cache_dir: PathBuf) -> Self {
+        if cache_complete(&cache_dir) {
+            self.cache_dir = Some(cache_dir);
+        }
+        self
     }
 
     /// Look for the F* binary relative to the project root, falling back to
@@ -57,6 +66,12 @@ impl FstarRunner {
 
         cmd.args(["--fuel", "8", "--ifuel", "2", "--z3rlimit", "30"]);
         cmd.args(["--message_format", "json"]);
+
+        if let Some(cache) = &self.cache_dir {
+            cmd.arg("--cache_dir").arg(cache);
+            cmd.args(["--already_cached", "BPF"]);
+        }
+
         cmd.arg(fstar_file);
 
         let output = cmd.output().map_err(VerifyError::FstarInvocation)?;
@@ -70,6 +85,19 @@ impl FstarRunner {
             Ok(VerifyResult::Fail { message })
         }
     }
+}
+
+const REQUIRED_CHECKED_MODULES: &[&str] = &[
+    "BPF.State", "BPF.Helpers", "BPF.Semantics", "BPF.Spec",
+    "BPF.Verify", "BPF.Witness", "BPF.DefaultSpec",
+    "BPF.Check.StackBounds", "BPF.Check.TypeSafety", "BPF.Check.NullSafety",
+    "BPF.Exec.Safe", "BPF.Tactic", "BPF.Tactic.Layered",
+];
+
+fn cache_complete(cache_dir: &Path) -> bool {
+    REQUIRED_CHECKED_MODULES.iter().all(|m| {
+        cache_dir.join(format!("{m}.fst.checked")).exists()
+    })
 }
 
 /// Try to locate `fstar.exe` on the system PATH using `which`.

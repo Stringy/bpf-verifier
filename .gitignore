@@ -1,2 +1,4 @@
 /target
 /.superpowers
+/fstar/.cache
+/docs/superpowers
