@@ -27,6 +27,7 @@ open BPF.Verify
    option constructors get over-normalised. *)
 let bpf_auto_pure () : Tac unit =
   norm [delta; iota; zeta; primops];
+  dump "NORMALISED_GOAL";
   smt ()
 
 (* Selective normalisation — unfolds BPF semantics and F* integer
@@ -40,4 +41,5 @@ let bpf_auto_map () : Tac unit =
                          "FStar.Int.Cast"; "FStar.Int.Cast.Full";
                          "FStar.Mul"; "FStar.List.Tot"];
         iota; zeta; primops];
+  dump "NORMALISED_GOAL";
   smt ()

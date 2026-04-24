@@ -50,6 +50,7 @@ open BPF.Exec.Safe
 *)
 let stack_bounds_tac () : Tac unit =
   norm [nbe; delta; iota; zeta; primops];
+  dump "STACK_BOUNDS_GOAL";
   trivial ()
 
 (*
@@ -74,6 +75,7 @@ let stack_bounds_tac () : Tac unit =
 *)
 let type_check_tac () : Tac unit =
   norm [nbe; delta; iota; zeta; primops];
+  dump "TYPE_SAFETY_GOAL";
   trivial ()
 
 (*
@@ -98,6 +100,7 @@ let type_check_tac () : Tac unit =
 *)
 let null_check_tac () : Tac unit =
   norm [nbe; delta; iota; zeta; primops];
+  dump "NULL_SAFETY_GOAL";
   trivial ()
 
 (*
@@ -141,4 +144,5 @@ let rec norm_steps (count: nat) : Tac unit =
 let bpf_auto_chunked (block_sizes: list int) : Tac unit =
   iter (fun size -> norm_steps size) block_sizes;
   norm [nbe; delta; iota; zeta; primops];
+  dump "NORMALISED_GOAL";
   smt ()

@@ -61,50 +61,15 @@ bpf-verifier verify prog.bpf.o \
 
 ## Writing specs
 
-Specs are F* modules that define a `spec : bpf_spec` value using combinators from `BPF.Spec`.
+Specs are F* modules that define a `spec : bpf_spec` value using combinators from `BPF.Spec`. The test corpus has plenty of examples — each programme in `tests/corpus/good/` has a matching `.bpf.c` and `.fst` file. Good starting points:
 
-**"This programme returns 42":**
+- `ReturnConst` — simplest possible spec, asserts a return value
+- `StackLocal` — stack load/store with a return value assertion
+- `MapLookup` — crash-safety for a programme with a map lookup and null check
+- `BranchGt` — spec with conditional behaviour
+- `BranchResult` — disjunctive spec over non-deterministic branches (map lookup success/failure)
 
-```fstar
-module StackLocal
-
-open FStar.UInt64
-open BPF.State
-open BPF.Spec
-
-let spec : bpf_spec =
-  post_only (fun final_st ->
-    state_get_reg final_st r0 == Scalar 42uL
-  )
-```
-
-**"This programme doesn't crash"** (map lookup with null check):
-
-```fstar
-module MapLookup
-
-open BPF.State
-open BPF.Spec
-
-let spec : bpf_spec =
-  post_only (fun _ -> True)
-```
-
-A spec that claims the wrong return value will fail verification — the verifier catches the mismatch:
-
-```fstar
-module WrongReturn
-
-open FStar.UInt64
-open BPF.State
-open BPF.Spec
-
-(* Claims the programme returns 1, but it actually returns 0. *)
-let spec : bpf_spec =
-  post_only (fun final_st ->
-    state_get_reg final_st r0 == Scalar 1uL
-  )
-```
+The `tests/corpus/bad/` directory has programmes paired with deliberately wrong specs, demonstrating what verification failure looks like.
 
 ## Running tests
 
