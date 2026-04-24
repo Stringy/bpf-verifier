@@ -149,6 +149,81 @@ pub fn parse_failed_stage(stderr: &str) -> Option<FailedStage> {
     None
 }
 
+/// Spec postcondition extracted from a spec file.
+#[derive(Debug, Clone)]
+pub struct SpecPostcondition {
+    pub start_line: usize,  // 1-based
+    pub text: String,
+}
+
+/// Extracts the spec definition from a spec file's contents.
+///
+/// Looks for `let spec` and captures everything from that line to the next blank line
+/// or a new `let` definition.
+pub fn extract_postcondition(spec_content: &str) -> Option<SpecPostcondition> {
+    let lines: Vec<&str> = spec_content.lines().collect();
+
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim_start().starts_with("let spec") {
+            let start_line = i + 1; // 1-based line numbering
+            let mut spec_lines = vec![*line];
+
+            // Collect lines until we hit a blank line or another `let` definition
+            for j in (i + 1)..lines.len() {
+                let next_line = lines[j];
+
+                // Stop at blank line
+                if next_line.trim().is_empty() {
+                    break;
+                }
+
+                // Stop at new top-level definition
+                if next_line.starts_with("let ") && !next_line.trim_start().starts_with("let spec") {
+                    break;
+                }
+
+                spec_lines.push(next_line);
+            }
+
+            return Some(SpecPostcondition {
+                start_line,
+                text: spec_lines.join("\n"),
+            });
+        }
+    }
+
+    None
+}
+
+/// Extracts unique C source locations from the generated F* source.
+///
+/// The codegen annotates instructions with `(* file:line *)` comments from DWARF debug info.
+pub fn extract_source_locations(generated_source: &str) -> Vec<String> {
+    let mut locations = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for line in generated_source.lines() {
+        // Look for (* ... *) comments
+        if let Some(start) = line.find("(*") {
+            if let Some(end) = line[start..].find("*)") {
+                let comment = &line[start + 2..start + end].trim();
+
+                // Filter to only file:line format
+                if comment.contains(':') {
+                    let location = comment.to_string();
+
+                    // Deduplicate while preserving order
+                    if seen.insert(location.clone()) {
+                        locations.push(location);
+                    }
+                }
+            }
+        }
+    }
+
+    locations
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,5 +339,44 @@ Goal 1/1
         assert_eq!(FailedStage::TypeSafety.to_string(), "type safety");
         assert_eq!(FailedStage::NullSafety.to_string(), "null safety");
         assert_eq!(FailedStage::FunctionalCorrectness.to_string(), "functional correctness");
+    }
+
+    #[test]
+    fn extract_spec_postcondition() {
+        let spec_content = r#"module BranchResult
+
+open FStar.UInt64
+open BPF.State
+open BPF.Spec
+
+(* The map lookup can succeed or fail *)
+let spec : bpf_spec =
+  post_only (fun final_st ->
+    state_get_reg final_st r0 == Scalar 0uL \/
+    state_get_reg final_st r0 == Scalar 5uL
+  )
+"#;
+        let post = extract_postcondition(spec_content);
+        assert!(post.is_some());
+        let post = post.unwrap();
+        assert_eq!(post.start_line, 8);
+        assert!(post.text.contains("Scalar 0uL"));
+        assert!(post.text.contains("Scalar 5uL"));
+    }
+
+    #[test]
+    fn extract_source_locations_from_generated() {
+        let generated = r#"let program : bpf_program = [
+  BPF_ALU32_IMM MOV r1 (0l)  (* BranchResult.bpf.c:13 *);
+  BPF_STX W32 r10 r1 (-4l)  (* BranchResult.bpf.c:14 *);
+  BPF_CALL MAP_LOOKUP_ELEM  (* BranchResult.bpf.c:15 *);
+  BPF_JMP64_IMM JNE r1 (0l) (1)  (* BranchResult.bpf.c:16 *);
+  BPF_ALU32_IMM MOV r0 (0l);
+  BPF_EXIT  (* BranchResult.bpf.c:19 *)
+]"#;
+        let locs = extract_source_locations(generated);
+        assert_eq!(locs.len(), 5);
+        assert_eq!(locs[0], "BranchResult.bpf.c:13");
+        assert_eq!(locs[4], "BranchResult.bpf.c:19");
     }
 }
