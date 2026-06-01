@@ -2,3 +2,5 @@
 /.superpowers
 /fstar/.cache
 /docs/superpowers
+*.bpf.o
+/scratch/
