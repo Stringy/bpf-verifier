@@ -1,3 +1,7 @@
+use std::path::Path;
+
+use ariadne::{CharSet, Config, Label, Report, ReportKind};
+
 /// A single dump block extracted from F* tactic output.
 #[derive(Debug, Clone)]
 pub struct DumpBlock {
@@ -25,11 +29,11 @@ pub fn parse_dumps(stderr: &str) -> Vec<DumpBlock> {
             while i < lines.len() {
                 let current = lines[i];
 
-                // Stop if we hit the next dump, an F* error, or a JSON message
                 if current.starts_with("proof-state: State dump")
                     || current.starts_with("* Error")
                     || current.starts_with("* Warning")
-                    || current.starts_with('{') {
+                    || current.starts_with('{')
+                    || current.starts_with("TAC>>") {
                     break;
                 }
 
@@ -72,7 +76,6 @@ pub fn parse_dumps(stderr: &str) -> Vec<DumpBlock> {
 }
 
 fn extract_dump_label(line: &str) -> Option<String> {
-    // Extract label from format: "proof-state: State dump @ depth 0 (LABEL):"
     line.find('(')
         .and_then(|start| {
             line[start + 1..].find(')')
@@ -100,28 +103,20 @@ impl std::fmt::Display for FailedStage {
     }
 }
 
-/// Parse F* stderr output to determine which proof stage failed.
-///
-/// F* with --message_format json emits one JSON object per line on stderr for
-/// errors/warnings. The ctx field contains context about which declaration failed.
 pub fn parse_failed_stage(stderr: &str) -> Option<FailedStage> {
     for line in stderr.lines() {
-        // Skip non-JSON lines (like dump blocks)
         if !line.starts_with('{') {
             continue;
         }
 
-        // Try to parse as JSON
         let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
 
-        // Only process Error-level messages
         if json.get("level").and_then(|v| v.as_str()) != Some("Error") {
             continue;
         }
 
-        // Check the ctx array for declaration context
         let Some(ctx) = json.get("ctx").and_then(|v| v.as_array()) else {
             continue;
         };
@@ -131,7 +126,6 @@ pub fn parse_failed_stage(stderr: &str) -> Option<FailedStage> {
                 continue;
             };
 
-            // Match against known proof declarations
             if ctx_str.contains("`let proof`") {
                 return Some(FailedStage::FunctionalCorrectness);
             }
@@ -147,8 +141,6 @@ pub fn parse_failed_stage(stderr: &str) -> Option<FailedStage> {
         }
     }
 
-    // Fallback: if we found dump blocks but no JSON errors, infer from
-    // the last dump label before the error
     let dumps = parse_dumps(stderr);
     if (stderr.contains("Error") || stderr.contains("Assertion failed"))
         && let Some(last) = dumps.last()
@@ -168,75 +160,48 @@ pub fn parse_failed_stage(stderr: &str) -> Option<FailedStage> {
 /// Spec postcondition extracted from a spec file.
 #[derive(Debug, Clone)]
 pub struct SpecPostcondition {
-    pub start_line: usize,  // 1-based
+    pub start_line: usize,  // 1-based, first line of the body (after `let spec = ...`)
+    pub end_line: usize,    // 1-based, last line of the body
     pub text: String,
 }
 
-/// Extracts the spec definition from a spec file's contents.
-///
-/// Looks for `let spec` and captures everything from that line to the next blank line
-/// or a new `let` definition.
 pub fn extract_postcondition(spec_content: &str) -> Option<SpecPostcondition> {
     let lines: Vec<&str> = spec_content.lines().collect();
 
     for (i, line) in lines.iter().enumerate() {
         if line.trim_start().starts_with("let spec") {
-            let start_line = i + 1; // 1-based line numbering
-            let mut spec_lines = vec![*line];
+            let mut body_lines = Vec::new();
+            let body_start = i + 1; // skip the `let spec` header line
 
-            // Collect lines until we hit a blank line or another `let` definition
             for &next_line in lines.iter().skip(i + 1) {
-
-                // Stop at blank line
                 if next_line.trim().is_empty() {
                     break;
                 }
-
-                // Stop at new top-level definition
                 if next_line.starts_with("let ") && !next_line.trim_start().starts_with("let spec") {
                     break;
                 }
-
-                spec_lines.push(next_line);
+                body_lines.push(next_line);
             }
 
+            if body_lines.is_empty() {
+                // Single-line spec like `let spec = returns_value 42uL`
+                return Some(SpecPostcondition {
+                    start_line: i + 1,
+                    end_line: i + 1,
+                    text: line.to_string(),
+                });
+            }
+
+            let end_line = body_start + body_lines.len(); // 1-based
             return Some(SpecPostcondition {
-                start_line,
-                text: spec_lines.join("\n"),
+                start_line: body_start + 1, // 1-based
+                end_line,
+                text: body_lines.join("\n"),
             });
         }
     }
 
     None
-}
-
-/// Extracts unique C source locations from the generated F* source.
-///
-/// The codegen annotates instructions with `(* file:line *)` comments from DWARF debug info.
-pub fn extract_source_locations(generated_source: &str) -> Vec<String> {
-    let mut locations = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    for line in generated_source.lines() {
-        // Look for (* ... *) comments
-        if let Some(start) = line.find("(*")
-            && let Some(end) = line[start..].find("*)")
-        {
-            let comment = &line[start + 2..start + end].trim();
-
-            // Filter to only file:line format
-            if comment.contains(':') {
-                let location = comment.to_string();
-
-                // Deduplicate while preserving order
-                if seen.insert(location.clone()) {
-                    locations.push(location);
-                }
-            }
-        }
-    }
-
-    locations
 }
 
 /// An instruction from the generated F* source with its PC and source location.
@@ -247,10 +212,6 @@ pub struct InstructionInfo {
     pub source_loc: Option<String>,
 }
 
-/// Extract the r0 origin PC from the R0_ORIGIN dump block.
-///
-/// The dump goal contains `N == N` where N is the PC number,
-/// possibly wrapped in `squash (forall ... . N == N)`.
 pub fn extract_r0_origin(dumps: &[DumpBlock]) -> Option<usize> {
     let dump = dumps.iter().find(|d| d.label == "R0_ORIGIN")?;
     let goal = dump.goal.trim();
@@ -259,11 +220,6 @@ pub fn extract_r0_origin(dumps: &[DumpBlock]) -> Option<usize> {
     after_eq.trim().parse().ok()
 }
 
-/// Extract instruction info at a given PC from the generated F* source.
-///
-/// The instruction list in the generated source has the form:
-///   BPF_ALU32_IMM MOV r0 (1l)  (* BranchResult.bpf.c:17 *);
-/// Each line corresponds to a PC (0-indexed from the first instruction).
 pub fn extract_instruction_at_pc(generated_source: &str, pc: usize) -> Option<InstructionInfo> {
     let mut current_pc = 0;
     for line in generated_source.lines() {
@@ -299,15 +255,62 @@ pub fn extract_instruction_at_pc(generated_source: &str, pc: usize) -> Option<In
 #[derive(Debug)]
 pub struct Diagnostic {
     pub stage: FailedStage,
-    pub normalised_goal: Option<String>,
     pub r0_origin: Option<InstructionInfo>,
     pub spec_file: Option<String>,
+    pub spec_content: Option<String>,
     pub spec_postcondition: Option<SpecPostcondition>,
-    pub source_locations: Vec<String>,
+    pub c_source_file: Option<String>,
+    pub c_source_content: Option<String>,
+    pub c_source_line: Option<u32>,
+    pub normalised_goal: Option<String>,
+}
+
+/// Compute the byte offset of the start of a 1-based line in source text.
+fn line_to_byte_offset(source: &str, line: usize) -> usize {
+    source
+        .lines()
+        .take(line.saturating_sub(1))
+        .map(|l| l.len() + 1) // +1 for newline
+        .sum()
+}
+
+/// Compute the byte range spanning an entire 1-based line (excluding newline).
+fn line_byte_range(source: &str, line: usize) -> std::ops::Range<usize> {
+    let start = line_to_byte_offset(source, line);
+    let line_text = source[start..].lines().next().unwrap_or("");
+    start..start + line_text.len()
+}
+
+
+/// Try to resolve a C source file path: DWARF path first, then adjacent to the object file.
+pub fn resolve_c_source(
+    source_loc: &str,
+    dwarf_paths: &[Option<crate::elf::parser::SourceLoc>],
+    program_path: Option<&Path>,
+) -> Option<(String, String)> {
+    let (basename, _line_str) = source_loc.rsplit_once(':')?;
+
+    // Try DWARF full path first
+    if let Some(sl) = dwarf_paths.iter().filter_map(|s| s.as_ref()).find(|sl| sl.file == basename)
+        && let Ok(content) = std::fs::read_to_string(&sl.path)
+    {
+        return Some((sl.path.clone(), content));
+    }
+
+    // Fall back to looking adjacent to the .bpf.o file
+    if let Some(prog_path) = program_path
+        && let Some(dir) = prog_path.parent()
+    {
+        let adjacent = dir.join(basename);
+        if let Ok(content) = std::fs::read_to_string(&adjacent) {
+            return Some((adjacent.display().to_string(), content));
+        }
+    }
+
+    None
 }
 
 impl Diagnostic {
-    /// Build a diagnostic from F* output and related source files.
     pub fn from_fstar_output(
         stderr: &str,
         generated_source: &str,
@@ -326,48 +329,85 @@ impl Diagnostic {
             .and_then(|pc| extract_instruction_at_pc(generated_source, pc));
 
         let spec_postcondition = spec_content.and_then(extract_postcondition);
-        let source_locations = extract_source_locations(generated_source);
 
         Some(Diagnostic {
             stage,
-            normalised_goal,
             r0_origin,
             spec_file: spec_file.map(|s| s.to_string()),
+            spec_content: spec_content.map(|s| s.to_string()),
             spec_postcondition,
-            source_locations,
+            c_source_file: None,
+            c_source_content: None,
+            c_source_line: None,
+            normalised_goal,
         })
     }
 
-    /// Format the diagnostic as a human-readable error message.
-    pub fn format(&self) -> String {
-        let mut output = format!("  {} check failed\n", self.stage);
+    /// Attach C source context (resolved separately by the caller).
+    pub fn with_c_source(mut self, file: String, content: String, line: u32) -> Self {
+        self.c_source_file = Some(file);
+        self.c_source_content = Some(content);
+        self.c_source_line = Some(line);
+        self
+    }
 
-        if let Some(origin) = &self.r0_origin {
-            output.push_str(&format!(
-                "\n  r0 set by instruction {} ({})\n",
-                origin.pc,
-                origin.source_loc.as_deref().unwrap_or("no source location"),
+    /// Render the diagnostic as a human-readable error message with
+    /// source annotations (Rust-style, via ariadne).
+    pub fn format(self) -> String {
+        let config = Config::default()
+            .with_char_set(CharSet::Unicode);
+
+        let spec_id: String = self.spec_file.unwrap_or_else(|| "spec.fst".into());
+        let c_id: String = self.c_source_file.unwrap_or_else(|| "source.bpf.c".into());
+        let spec_src = self.spec_content.unwrap_or_default();
+        let c_src = self.c_source_content.unwrap_or_default();
+
+        let anchor_span = if !spec_src.is_empty() && self.spec_postcondition.is_some() {
+            (spec_id.clone(), 0..0)
+        } else {
+            (c_id.clone(), 0..0)
+        };
+
+        let mut builder = Report::build(ReportKind::Error, anchor_span)
+            .with_config(config)
+            .with_message(format!("{} check failed", self.stage));
+
+        if !spec_src.is_empty() && let Some(ref postcond) = self.spec_postcondition {
+            for line_num in postcond.start_line..=postcond.end_line {
+                let range = line_byte_range(&spec_src, line_num);
+                if !spec_src[range.clone()].trim().is_empty() {
+                    builder = builder.with_label(
+                        Label::new((spec_id.clone(), range))
+                    );
+                }
+            }
+        }
+
+        if !c_src.is_empty() && let Some(line) = self.c_source_line {
+            let range = line_byte_range(&c_src, line as usize);
+            let insn_msg = self.r0_origin.as_ref()
+                .map(|o| format!("r0 set here ({})", o.instruction))
+                .unwrap_or_else(|| "r0 set here".to_string());
+            builder = builder.with_label(
+                Label::new((c_id.clone(), range))
+                    .with_message(insn_msg)
+            );
+        } else if let Some(ref origin) = self.r0_origin {
+            let loc = origin.source_loc.as_deref().unwrap_or("unknown");
+            builder = builder.with_note(format!(
+                "r0 set at {} ({})", loc, origin.instruction
             ));
-            output.push_str(&format!("    {}\n", origin.instruction));
         }
 
-        if let Some(goal) = &self.normalised_goal {
-            output.push_str("\n  Normalised proof obligation (what F* tried to prove):\n");
-            for line in goal.lines() {
-                output.push_str(&format!("    {}\n", line));
-            }
-        }
+        let report = builder.finish();
 
-        if let Some(spec_file) = &self.spec_file
-            && let Some(postcond) = &self.spec_postcondition
-        {
-            output.push_str(&format!("\n  Spec ({}:{}):\n", spec_file, postcond.start_line));
-            for line in postcond.text.lines() {
-                output.push_str(&format!("    {}\n", line));
-            }
-        }
-
-        output
+        let mut buf = Vec::new();
+        let cache = ariadne::sources([
+            (spec_id, spec_src),
+            (c_id, c_src),
+        ]);
+        let _ = report.write(cache, &mut buf);
+        String::from_utf8(buf).unwrap_or_default()
     }
 }
 
@@ -506,25 +546,10 @@ let spec : bpf_spec =
         let post = extract_postcondition(spec_content);
         assert!(post.is_some());
         let post = post.unwrap();
-        assert_eq!(post.start_line, 8);
+        assert_eq!(post.start_line, 9);
+        assert_eq!(post.end_line, 12);
         assert!(post.text.contains("Scalar 0uL"));
         assert!(post.text.contains("Scalar 5uL"));
-    }
-
-    #[test]
-    fn extract_source_locations_from_generated() {
-        let generated = r#"let program : bpf_program = [
-  BPF_ALU32_IMM MOV r1 (0l)  (* BranchResult.bpf.c:13 *);
-  BPF_STX W32 r10 r1 (-4l)  (* BranchResult.bpf.c:14 *);
-  BPF_CALL MAP_LOOKUP_ELEM  (* BranchResult.bpf.c:15 *);
-  BPF_JMP64_IMM JNE r1 (0l) (1)  (* BranchResult.bpf.c:16 *);
-  BPF_ALU32_IMM MOV r0 (0l);
-  BPF_EXIT  (* BranchResult.bpf.c:19 *)
-]"#;
-        let locs = extract_source_locations(generated);
-        assert_eq!(locs.len(), 5);
-        assert_eq!(locs[0], "BranchResult.bpf.c:13");
-        assert_eq!(locs[4], "BranchResult.bpf.c:19");
     }
 
     #[test]
@@ -556,29 +581,58 @@ let spec : bpf_spec =
     }
 
     #[test]
-    fn format_functional_failure_diagnostic() {
+    fn format_shows_spec_and_stage() {
         let diag = Diagnostic {
             stage: FailedStage::FunctionalCorrectness,
-            normalised_goal: Some("squash (forall (init: bpf_state).\n        l_True ==> Scalar 1uL == Scalar 0uL \\/ Scalar 1uL == Scalar 5uL)".to_string()),
             r0_origin: Some(InstructionInfo {
-                pc: 7,
-                instruction: "BPF_ALU32_IMM MOV r0 (1l)".to_string(),
-                source_loc: Some("BranchResult.bpf.c:17".to_string()),
+                pc: 0,
+                instruction: "BPF_ALU32_IMM MOV r0 (0l)".to_string(),
+                source_loc: Some("test.bpf.c:5".to_string()),
             }),
-            spec_file: Some("BranchResult.fst".to_string()),
+            spec_file: Some("Test.fst".to_string()),
+            spec_content: Some("module Test\nopen BPF.Spec\nlet spec : bpf_spec =\n  returns_value 1uL\n".to_string()),
             spec_postcondition: Some(SpecPostcondition {
-                start_line: 10,
-                text: "let spec : bpf_spec =\n  post_only (fun final_st ->\n    state_get_reg final_st r0 == Scalar 0uL \\/\n    state_get_reg final_st r0 == Scalar 5uL\n  )".to_string(),
+                start_line: 4,
+                end_line: 4,
+                text: "  returns_value 1uL".to_string(),
             }),
-            source_locations: vec![],
+            c_source_file: Some("test.bpf.c".to_string()),
+            c_source_content: Some("int main() {\n    return 0;\n}\n".to_string()),
+            c_source_line: Some(2),
+            normalised_goal: None,
         };
         let output = diag.format();
-        assert!(output.contains("functional correctness"));
-        assert!(output.contains("instruction 7"));
-        assert!(output.contains("BranchResult.bpf.c:17"));
-        assert!(output.contains("BPF_ALU32_IMM MOV r0 (1l)"));
-        assert!(output.contains("Scalar 1uL == Scalar 0uL"));
-        assert!(output.contains("BranchResult.fst:10"));
+        assert!(output.contains("functional correctness check failed"));
+        assert!(output.contains("Test.fst"));
+        assert!(output.contains("returns_value 1uL"));
+        assert!(output.contains("test.bpf.c"));
+        assert!(output.contains("r0 set here"));
+    }
+
+    #[test]
+    fn format_without_c_source_shows_note() {
+        let diag = Diagnostic {
+            stage: FailedStage::FunctionalCorrectness,
+            r0_origin: Some(InstructionInfo {
+                pc: 0,
+                instruction: "BPF_ALU32_IMM MOV r0 (0l)".to_string(),
+                source_loc: Some("test.bpf.c:5".to_string()),
+            }),
+            spec_file: Some("Test.fst".to_string()),
+            spec_content: Some("module Test\nopen BPF.Spec\nlet spec : bpf_spec =\n  returns_value 1uL\n".to_string()),
+            spec_postcondition: Some(SpecPostcondition {
+                start_line: 4,
+                end_line: 4,
+                text: "  returns_value 1uL".to_string(),
+            }),
+            c_source_file: None,
+            c_source_content: None,
+            c_source_line: None,
+            normalised_goal: None,
+        };
+        let output = diag.format();
+        assert!(output.contains("functional correctness check failed"));
+        assert!(output.contains("r0 set at test.bpf.c:5"));
     }
 
     #[test]
@@ -645,5 +699,13 @@ let spec : bpf_spec =
         let stderr = "some random output\n";
         let stage = parse_failed_stage(stderr);
         assert_eq!(stage, None);
+    }
+
+    #[test]
+    fn line_byte_offset_calculation() {
+        let source = "line 1\nline 2\nline 3\n";
+        assert_eq!(line_to_byte_offset(source, 1), 0);
+        assert_eq!(line_to_byte_offset(source, 2), 7);
+        assert_eq!(line_to_byte_offset(source, 3), 14);
     }
 }

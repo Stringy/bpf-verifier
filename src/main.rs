@@ -6,7 +6,7 @@ use clap::Parser;
 use bpf_verifier::analysis::stack_bounds;
 use bpf_verifier::codegen::fstar::generate_fstar;
 use bpf_verifier::elf::parser::{parse_elf, BpfProgram};
-use bpf_verifier::verify::diagnostic::Diagnostic;
+use bpf_verifier::verify::diagnostic::{Diagnostic, resolve_c_source};
 use bpf_verifier::verify::runner::{FstarRunner, VerifyResult};
 
 #[derive(Parser)]
@@ -249,7 +249,7 @@ fn run_verify(
 
     for prog in &programs {
         let spec_path = spec_map.get(&prog.section_name).map(|p| p.as_path());
-        match verify_program(prog, spec_path, &root, fstar_path_override, verbose) {
+        match verify_program(prog, spec_path, program_path, &root, fstar_path_override, verbose) {
             Ok(true) => {
                 let label = if spec_path.is_some() {
                     "satisfies spec"
@@ -284,6 +284,7 @@ fn run_verify(
 fn verify_program(
     prog: &BpfProgram,
     spec_path: Option<&Path>,
+    program_path: &Path,
     project_root: &Path,
     fstar_path_override: Option<&Path>,
     verbose: bool,
@@ -356,12 +357,22 @@ fn verify_program(
                 .and_then(|p| p.file_name())
                 .and_then(|n| n.to_str());
 
-            if let Some(diag) = Diagnostic::from_fstar_output(
+            if let Some(mut diag) = Diagnostic::from_fstar_output(
                 &message,
                 &fstar_source,
                 spec_filename,
                 spec_content.as_deref(),
             ) {
+                if let Some(ref origin) = diag.r0_origin
+                    && let Some(ref loc) = origin.source_loc
+                    && let Some((path, content)) =
+                        resolve_c_source(loc, &prog.source_locs, Some(program_path))
+                {
+                    let line = loc.rsplit_once(':')
+                        .and_then(|(_, l)| l.parse::<u32>().ok())
+                        .unwrap_or(1);
+                    diag = diag.with_c_source(path, content, line);
+                }
                 eprint!("{}", diag.format());
             }
 

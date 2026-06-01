@@ -19,6 +19,7 @@ pub enum ParseError {
 #[derive(Debug, Clone)]
 pub struct SourceLoc {
     pub file: String,
+    pub path: String,
     pub line: u32,
 }
 
@@ -121,6 +122,7 @@ fn lookup_source_loc(ctx: &Option<Addr2LineCtx>, addr: u64) -> Option<SourceLoc>
     let basename = file.rsplit('/').next().unwrap_or(file);
     Some(SourceLoc {
         file: basename.to_string(),
+        path: file.to_string(),
         line,
     })
 }
