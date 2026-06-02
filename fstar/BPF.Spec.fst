@@ -57,3 +57,12 @@ let returns_and_writes (v: UInt64.t) (p: ringbuf_mem -> prop) : bpf_spec =
     state_get_reg st r0 == Scalar v /\
     p st.ringbuf
   )
+
+(* Assert the ring buffer contains exactly `n` writes.
+   Combine with ringbuf_read_any to prove a programme writes
+   *only* the expected fields — no extra writes. *)
+let ringbuf_exactly (n: nat) (p: ringbuf_mem -> prop) : bpf_spec =
+  post_only (fun st ->
+    ringbuf_length st.ringbuf == n /\
+    p st.ringbuf
+  )
