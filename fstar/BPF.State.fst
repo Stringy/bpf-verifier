@@ -178,7 +178,7 @@ let rec ringbuf_read_any (mem: ringbuf_mem) (offset: int) (w: mem_width)
     then Some slot.rb_value
     else ringbuf_read_any rest offset w
 
-let ringbuf_length (mem: ringbuf_mem) : nat =
+let ringbuf_write_count (mem: ringbuf_mem) : nat =
   List.Tot.length mem
 
 let ringbuf_write (mem: ringbuf_mem) (id: nat) (offset: int) (w: mem_width) (v: UInt64.t)
