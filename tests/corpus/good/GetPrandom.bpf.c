@@ -1,6 +1,5 @@
-#define SEC(name) __attribute__((section(name), used))
-
-static unsigned int (*bpf_get_prandom_u32)(void) = (void *)7;
+#include "vmlinux.h"
+#include <bpf/bpf_helpers.h>
 
 SEC("test")
 int get_prandom(void *ctx) {

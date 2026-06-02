@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn compile_bpf(src: &Path, out: &Path) {
+    let include_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("include");
     let status = Command::new("clang")
         .args(["-target", "bpf"])
         .arg("-O2")
@@ -11,6 +12,9 @@ fn compile_bpf(src: &Path, out: &Path) {
         .arg("-c")
         .arg("-Wall")
         .arg("-Werror")
+        .arg("-D__TARGET_ARCH_x86_64")
+        .arg("-I")
+        .arg(&include_dir)
         .arg(src)
         .arg("-o")
         .arg(out)

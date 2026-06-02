@@ -1,11 +1,9 @@
-#define SEC(name) __attribute__((section(name), used))
-
-static void *(*bpf_ringbuf_reserve)(void *ringbuf, unsigned long long size, unsigned long long flags) = (void *)131;
-static void (*bpf_ringbuf_submit)(void *data, unsigned long long flags) = (void *)132;
+#include "vmlinux.h"
+#include <bpf/bpf_helpers.h>
 
 struct {
-    int (*type)[27];
-    int (*max_entries)[4096];
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 4096);
 } events SEC(".maps");
 
 SEC("test")

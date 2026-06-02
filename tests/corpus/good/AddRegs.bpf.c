@@ -1,4 +1,5 @@
-#define SEC(name) __attribute__((section(name), used))
+#include "vmlinux.h"
+#include <bpf/bpf_helpers.h>
 
 SEC("test")
 int add_regs(void *ctx) {

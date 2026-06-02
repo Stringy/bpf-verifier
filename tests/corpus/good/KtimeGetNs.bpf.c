@@ -1,6 +1,5 @@
-#define SEC(name) __attribute__((section(name), used))
-
-static unsigned long long (*bpf_ktime_get_ns)(void) = (void *)5;
+#include "vmlinux.h"
+#include <bpf/bpf_helpers.h>
 
 SEC("test")
 int ktime_get_ns(void *ctx) {
