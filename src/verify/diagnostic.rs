@@ -259,10 +259,36 @@ pub struct Diagnostic {
     pub spec_file: Option<String>,
     pub spec_content: Option<String>,
     pub spec_postcondition: Option<SpecPostcondition>,
+    pub spec_error_line: Option<usize>,
     pub c_source_file: Option<String>,
     pub c_source_content: Option<String>,
     pub c_source_line: Option<u32>,
     pub normalised_goal: Option<String>,
+}
+
+fn parse_spec_error_line(stderr: &str, spec_file: Option<&str>) -> Option<usize> {
+    let spec_name = spec_file?;
+    for line in stderr.lines() {
+        if !line.starts_with('{') {
+            continue;
+        }
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if json.get("level").and_then(|v| v.as_str()) != Some("Error") {
+            continue;
+        }
+        let msgs = json.get("msg").and_then(|v| v.as_array())?;
+        for msg in msgs {
+            let s = msg.as_str()?;
+            if s.starts_with("Also see:") && s.contains(spec_name) {
+                let after_paren = s.split('(').nth(1)?;
+                let line_str = after_paren.split(',').next()?;
+                return line_str.parse().ok();
+            }
+        }
+    }
+    None
 }
 
 /// Compute the byte offset of the start of a 1-based line in source text.
@@ -329,6 +355,7 @@ impl Diagnostic {
             .and_then(|pc| extract_instruction_at_pc(generated_source, pc));
 
         let spec_postcondition = spec_content.and_then(extract_postcondition);
+        let spec_error_line = parse_spec_error_line(stderr, spec_file);
 
         Some(Diagnostic {
             stage,
@@ -336,6 +363,7 @@ impl Diagnostic {
             spec_file: spec_file.map(|s| s.to_string()),
             spec_content: spec_content.map(|s| s.to_string()),
             spec_postcondition,
+            spec_error_line,
             c_source_file: None,
             c_source_content: None,
             c_source_line: None,
@@ -372,13 +400,23 @@ impl Diagnostic {
             .with_config(config)
             .with_message(format!("{} check failed", self.stage));
 
-        if !spec_src.is_empty() && let Some(ref postcond) = self.spec_postcondition {
-            for line_num in postcond.start_line..=postcond.end_line {
-                let range = line_byte_range(&spec_src, line_num);
+        if !spec_src.is_empty() {
+            if let Some(err_line) = self.spec_error_line {
+                let range = line_byte_range(&spec_src, err_line);
                 if !spec_src[range.clone()].trim().is_empty() {
                     builder = builder.with_label(
                         Label::new((spec_id.clone(), range))
+                            .with_message("this condition could not be proved")
                     );
+                }
+            } else if let Some(ref postcond) = self.spec_postcondition {
+                for line_num in postcond.start_line..=postcond.end_line {
+                    let range = line_byte_range(&spec_src, line_num);
+                    if !spec_src[range.clone()].trim().is_empty() {
+                        builder = builder.with_label(
+                            Label::new((spec_id.clone(), range))
+                        );
+                    }
                 }
             }
         }
@@ -596,6 +634,7 @@ let spec : bpf_spec =
                 end_line: 4,
                 text: "  returns_value 1uL".to_string(),
             }),
+            spec_error_line: None,
             c_source_file: Some("test.bpf.c".to_string()),
             c_source_content: Some("int main() {\n    return 0;\n}\n".to_string()),
             c_source_line: Some(2),
@@ -625,6 +664,7 @@ let spec : bpf_spec =
                 end_line: 4,
                 text: "  returns_value 1uL".to_string(),
             }),
+            spec_error_line: None,
             c_source_file: None,
             c_source_content: None,
             c_source_line: None,
