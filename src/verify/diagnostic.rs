@@ -126,7 +126,7 @@ pub fn parse_failed_stage(stderr: &str) -> Option<FailedStage> {
                 continue;
             };
 
-            if ctx_str.contains("`let proof`") {
+            if ctx_str.contains("`let proof`") || ctx_str.contains("`let proof_path_") {
                 return Some(FailedStage::FunctionalCorrectness);
             }
             if ctx_str.contains("`let ts_proof`") {
