@@ -2,6 +2,7 @@
 pub enum HelperReturn {
     Scalar,
     MapPtr,
+    RingBufPtr,
     ErrorCode,
 }
 
@@ -29,7 +30,7 @@ const HELPERS: &[HelperSpec] = &[
     HelperSpec { id: 113, name: "PROBE_READ_KERNEL",     ret_type: HelperReturn::ErrorCode },
     HelperSpec { id: 115, name: "PROBE_READ_KERNEL_STR", ret_type: HelperReturn::ErrorCode },
     HelperSpec { id: 125, name: "KTIME_GET_BOOT_NS",     ret_type: HelperReturn::Scalar },
-    HelperSpec { id: 131, name: "RINGBUF_RESERVE",       ret_type: HelperReturn::MapPtr },
+    HelperSpec { id: 131, name: "RINGBUF_RESERVE",       ret_type: HelperReturn::RingBufPtr },
     HelperSpec { id: 132, name: "RINGBUF_SUBMIT",        ret_type: HelperReturn::ErrorCode },
     HelperSpec { id: 133, name: "RINGBUF_DISCARD",       ret_type: HelperReturn::ErrorCode },
     HelperSpec { id: 147, name: "D_PATH",                ret_type: HelperReturn::ErrorCode },
@@ -40,6 +41,12 @@ pub fn get_helper(id: i32) -> Option<&'static HelperSpec> {
     HELPERS.iter().find(|h| h.id == id)
 }
 
+pub fn returns_nullable_ptr(id: i32) -> bool {
+    get_helper(id).is_some_and(|h| {
+        matches!(h.ret_type, HelperReturn::MapPtr | HelperReturn::RingBufPtr)
+    })
+}
+
 pub fn returns_map_ptr(id: i32) -> bool {
-    get_helper(id).is_some_and(|h| h.ret_type == HelperReturn::MapPtr)
+    returns_nullable_ptr(id)
 }

@@ -15,6 +15,7 @@ FSTAR_MODULES := \
 	BPF.Check.NullSafety \
 	BPF.Witness \
 	BPF.Exec.Safe \
+	BPF.Exec.Path \
 	BPF.Tactic \
 	BPF.Tactic.Layered
 

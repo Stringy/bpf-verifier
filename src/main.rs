@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
-use bpf_verifier::analysis::stack_bounds;
+use bpf_verifier::analysis::{dataflow, stack_bounds};
 use bpf_verifier::codegen::fstar::generate_fstar;
 use bpf_verifier::elf::parser::{parse_elf, BpfProgram};
 use bpf_verifier::verify::diagnostic::{Diagnostic, resolve_c_source};
@@ -177,9 +177,10 @@ fn run_codegen(
         return 1;
     }
 
+    let df_result = dataflow::analyse(&prog.instructions);
     let fstar_source = generate_fstar(
         &safe_name, &prog.instructions, &prog.source_locs,
-        &spec_module, &spec_name, &sb_witness,
+        &spec_module, &spec_name, &sb_witness, &df_result,
     );
 
     print!("{fstar_source}");
@@ -310,7 +311,8 @@ fn verify_program(
         ));
     }
 
-    let fstar_source = generate_fstar(&safe_name, &prog.instructions, &prog.source_locs, &spec_module, &spec_name, &sb_witness);
+    let df_result = dataflow::analyse(&prog.instructions);
+    let fstar_source = generate_fstar(&safe_name, &prog.instructions, &prog.source_locs, &spec_module, &spec_name, &sb_witness, &df_result);
 
     if verbose {
         eprintln!("--- Generated F* source for {program_name} ---");

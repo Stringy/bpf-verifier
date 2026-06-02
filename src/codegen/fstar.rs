@@ -3,6 +3,7 @@ use std::fmt::Write;
 
 use askama::Template;
 
+use crate::analysis::dataflow::DataflowResult;
 use crate::analysis::stack_bounds::AnalysisResult;
 use crate::bpf::basic_block::find_basic_blocks;
 use crate::bpf::instruction::{AluOp, BpfInsn, Opcode, Source};
@@ -19,6 +20,7 @@ struct VerifyModule<'a> {
     has_map_calls: bool,
     block_sizes: Vec<usize>,
     sb_witness_steps: Vec<String>,
+    path_schedules: Vec<Vec<String>>,
 }
 
 pub fn generate_fstar(
@@ -28,6 +30,7 @@ pub fn generate_fstar(
     spec_module: &str,
     spec_name: &str,
     sb_witness: &AnalysisResult,
+    dataflow: &DataflowResult,
 ) -> String {
     let hints = generate_bitwise_hints(instructions);
     let has_map_calls = instructions.iter().any(|i| {
@@ -38,6 +41,13 @@ pub fn generate_fstar(
     let sb_witness_steps: Vec<String> = sb_witness.steps.iter()
         .map(|step| step.to_fstar())
         .collect();
+    let path_schedules: Vec<Vec<String>> = if dataflow.has_nullable_helpers {
+        dataflow.paths.iter()
+            .map(|p| p.schedule.iter().map(|c| c.to_fstar().to_string()).collect())
+            .collect()
+    } else {
+        Vec::new()
+    };
     let annotated: Vec<String> = instructions
         .iter()
         .zip(source_locs.iter())
@@ -55,6 +65,7 @@ pub fn generate_fstar(
         has_map_calls,
         block_sizes,
         sb_witness_steps,
+        path_schedules,
     };
     tmpl.render().expect("failed to render F* template")
 }
@@ -147,7 +158,8 @@ mod tests {
 
         let source_locs: Vec<Option<SourceLoc>> = vec![None; instructions.len()];
         let sb_witness = crate::analysis::stack_bounds::analyse(&instructions);
-        let output = generate_fstar("test_prog", &instructions, &source_locs, "TestSpec", "test_spec", &sb_witness);
+        let dataflow = crate::analysis::dataflow::analyse(&instructions);
+        let output = generate_fstar("test_prog", &instructions, &source_locs, "TestSpec", "test_spec", &sb_witness, &dataflow);
 
         assert!(output.contains("module Verify_test_prog"));
         assert!(output.contains("open BPF.State"));
