@@ -166,6 +166,18 @@ let rec ringbuf_read (mem: ringbuf_mem) (id: nat) (offset: int) (w: mem_width)
     then Some slot.rb_value
     else ringbuf_read rest id offset w
 
+(* Read by offset and width only, ignoring the ring buffer ID.
+   Useful in specs where the ID is allocated dynamically and
+   the user doesn't care which ring buffer slot was used. *)
+let rec ringbuf_read_any (mem: ringbuf_mem) (offset: int) (w: mem_width)
+  : option UInt64.t =
+  match mem with
+  | [] -> None
+  | slot :: rest ->
+    if slot.rb_offset = offset && slot.rb_width = w
+    then Some slot.rb_value
+    else ringbuf_read_any rest offset w
+
 let ringbuf_write (mem: ringbuf_mem) (id: nat) (offset: int) (w: mem_width) (v: UInt64.t)
   : ringbuf_mem =
   { rb_id = id; rb_offset = offset; rb_width = w; rb_value = v } :: mem
