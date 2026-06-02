@@ -30,6 +30,13 @@ open FStar.UInt64
 {%- endfor %}
 {%- endif %}
 
+{%- if !struct_accessors.is_empty() %}
+
+{%- for accessor in struct_accessors %}
+{{ accessor }}
+{%- endfor %}
+{%- endif %}
+
 (* Stack bounds safety — Rust-computed witness, each step validated by F* *)
 open BPF.Witness
 {%- for step in sb_witness_steps %}

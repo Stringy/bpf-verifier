@@ -7,7 +7,7 @@ use crate::analysis::dataflow::DataflowResult;
 use crate::analysis::stack_bounds::AnalysisResult;
 use crate::bpf::basic_block::find_basic_blocks;
 use crate::bpf::instruction::{AluOp, BpfInsn, Opcode, Source};
-use crate::elf::parser::SourceLoc;
+use crate::elf::parser::{SourceLoc, StructDef};
 
 #[derive(Template)]
 #[template(path = "verify.fst")]
@@ -21,6 +21,7 @@ struct VerifyModule<'a> {
     block_sizes: Vec<usize>,
     sb_witness_steps: Vec<String>,
     path_schedules: Vec<Vec<String>>,
+    struct_accessors: Vec<String>,
 }
 
 pub fn generate_fstar(
@@ -31,6 +32,7 @@ pub fn generate_fstar(
     spec_name: &str,
     sb_witness: &AnalysisResult,
     dataflow: &DataflowResult,
+    structs: &[StructDef],
 ) -> String {
     let hints = generate_bitwise_hints(instructions);
     let has_map_calls = instructions.iter().any(|i| {
@@ -48,6 +50,7 @@ pub fn generate_fstar(
     } else {
         Vec::new()
     };
+    let struct_accessors = generate_struct_accessors(structs);
     let annotated: Vec<String> = instructions
         .iter()
         .zip(source_locs.iter())
@@ -66,8 +69,53 @@ pub fn generate_fstar(
         block_sizes,
         sb_witness_steps,
         path_schedules,
+        struct_accessors,
     };
     tmpl.render().expect("failed to render F* template")
+}
+
+fn width_fstar(byte_size: u64) -> &'static str {
+    match byte_size {
+        1 => "W8",
+        2 => "W16",
+        4 => "W32",
+        8 => "W64",
+        _ => "W64",
+    }
+}
+
+fn generate_struct_accessors(structs: &[StructDef]) -> Vec<String> {
+    let mut accessors = Vec::new();
+    for s in structs {
+        accessors.push(format!("(* Field accessors for struct {} *)", s.name));
+        for f in &s.fields {
+            accessors.push(format!(
+                "let {}_{} (rb: ringbuf_mem) : option UInt64.t = ringbuf_read_any rb {} {}",
+                s.name, f.name, f.offset, width_fstar(f.byte_size)
+            ));
+        }
+    }
+    accessors
+}
+
+pub fn generate_fields_module(structs: &[StructDef]) -> String {
+    let mut out = String::new();
+    out.push_str("module Fields\n\n");
+    out.push_str("open FStar.UInt64\n");
+    out.push_str("open BPF.State\n\n");
+    for s in structs {
+        writeln!(out, "(* struct {} *)", s.name).unwrap();
+        for f in &s.fields {
+            writeln!(
+                out,
+                "let {}_{} (rb: ringbuf_mem) : option UInt64.t = ringbuf_read_any rb {} {}",
+                s.name, f.name, f.offset, width_fstar(f.byte_size)
+            )
+            .unwrap();
+        }
+        out.push('\n');
+    }
+    out
 }
 
 fn is_bitwise_op(op: AluOp) -> bool {
@@ -159,7 +207,7 @@ mod tests {
         let source_locs: Vec<Option<SourceLoc>> = vec![None; instructions.len()];
         let sb_witness = crate::analysis::stack_bounds::analyse(&instructions);
         let dataflow = crate::analysis::dataflow::analyse(&instructions);
-        let output = generate_fstar("test_prog", &instructions, &source_locs, "TestSpec", "test_spec", &sb_witness, &dataflow);
+        let output = generate_fstar("test_prog", &instructions, &source_locs, "TestSpec", "test_spec", &sb_witness, &dataflow, &[]);
 
         assert!(output.contains("module Verify_test_prog"));
         assert!(output.contains("open BPF.State"));

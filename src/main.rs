@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 
 use bpf_verifier::analysis::{dataflow, stack_bounds};
-use bpf_verifier::codegen::fstar::generate_fstar;
-use bpf_verifier::elf::parser::{parse_elf, BpfProgram};
+use bpf_verifier::codegen::fstar::{generate_fstar, generate_fields_module};
+use bpf_verifier::elf::parser::{parse_elf, BpfProgram, StructDef};
 use bpf_verifier::verify::diagnostic::{Diagnostic, resolve_c_source};
 use bpf_verifier::verify::runner::{FstarRunner, VerifyResult};
 
@@ -180,7 +180,7 @@ fn run_codegen(
     let df_result = dataflow::analyse(&prog.instructions);
     let fstar_source = generate_fstar(
         &safe_name, &prog.instructions, &prog.source_locs,
-        &spec_module, &spec_name, &sb_witness, &df_result,
+        &spec_module, &spec_name, &sb_witness, &df_result, &bpf_object.structs,
     );
 
     print!("{fstar_source}");
@@ -250,7 +250,7 @@ fn run_verify(
 
     for prog in &programs {
         let spec_path = spec_map.get(&prog.section_name).map(|p| p.as_path());
-        match verify_program(prog, spec_path, program_path, &root, fstar_path_override, verbose) {
+        match verify_program(prog, spec_path, program_path, &root, fstar_path_override, verbose, &bpf_object.structs) {
             Ok(true) => {
                 let label = if spec_path.is_some() {
                     "satisfies spec"
@@ -289,6 +289,7 @@ fn verify_program(
     project_root: &Path,
     fstar_path_override: Option<&Path>,
     verbose: bool,
+    structs: &[StructDef],
 ) -> Result<bool, String> {
     let program_name = &prog.section_name;
     let safe_name = program_name.replace('/', "_");
@@ -312,7 +313,7 @@ fn verify_program(
     }
 
     let df_result = dataflow::analyse(&prog.instructions);
-    let fstar_source = generate_fstar(&safe_name, &prog.instructions, &prog.source_locs, &spec_module, &spec_name, &sb_witness, &df_result);
+    let fstar_source = generate_fstar(&safe_name, &prog.instructions, &prog.source_locs, &spec_module, &spec_name, &sb_witness, &df_result, structs);
 
     if verbose {
         eprintln!("--- Generated F* source for {program_name} ---");
@@ -327,6 +328,13 @@ fn verify_program(
     let fst_path = tmp_dir.path().join(&fst_filename);
     std::fs::write(&fst_path, &fstar_source)
         .map_err(|e| format!("failed to write generated F* file: {e}"))?;
+
+    if !structs.is_empty() {
+        let fields_source = generate_fields_module(structs);
+        let fields_path = tmp_dir.path().join("Fields.fst");
+        std::fs::write(&fields_path, &fields_source)
+            .map_err(|e| format!("failed to write fields module: {e}"))?;
+    }
 
     if let Some(path) = spec_path {
         let spec_dest = tmp_dir.path().join(

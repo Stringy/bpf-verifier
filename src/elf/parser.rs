@@ -30,9 +30,23 @@ pub struct BpfProgram {
     pub source_locs: Vec<Option<SourceLoc>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct StructField {
+    pub name: String,
+    pub offset: u64,
+    pub byte_size: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct StructDef {
+    pub name: String,
+    pub fields: Vec<StructField>,
+}
+
 #[derive(Debug)]
 pub struct BpfObject {
     pub programs: Vec<BpfProgram>,
+    pub structs: Vec<StructDef>,
 }
 
 /// Parse an ELF binary and extract BPF programs from text sections.
@@ -44,7 +58,9 @@ pub struct BpfObject {
 pub fn parse_elf(data: &[u8]) -> Result<BpfObject, ParseError> {
     let file = File::parse(data)?;
 
-    let addr2line_ctx = build_addr2line_context(&file);
+    let dwarf = build_dwarf(&file);
+    let structs = dwarf.as_ref().map(extract_structs).unwrap_or_default();
+    let addr2line_ctx = dwarf.and_then(|d| addr2line::Context::from_dwarf(d).ok());
 
     let mut programs = Vec::new();
 
@@ -96,12 +112,13 @@ pub fn parse_elf(data: &[u8]) -> Result<BpfObject, ParseError> {
         return Err(ParseError::NoProgramSections);
     }
 
-    Ok(BpfObject { programs })
+    Ok(BpfObject { programs, structs })
 }
 
+type GimliDwarf<'a> = gimli::Dwarf<gimli::EndianSlice<'a, gimli::LittleEndian>>;
 type Addr2LineCtx<'a> = addr2line::Context<gimli::EndianSlice<'a, gimli::LittleEndian>>;
 
-fn build_addr2line_context<'a>(file: &'a File<'a>) -> Option<Addr2LineCtx<'a>> {
+fn build_dwarf<'a>(file: &'a File<'a>) -> Option<GimliDwarf<'a>> {
     let load_section = |id: gimli::SectionId| -> Result<gimli::EndianSlice<gimli::LittleEndian>, gimli::Error> {
         use object::ObjectSection;
         let data = file
@@ -110,8 +127,64 @@ fn build_addr2line_context<'a>(file: &'a File<'a>) -> Option<Addr2LineCtx<'a>> {
             .unwrap_or(&[]);
         Ok(gimli::EndianSlice::new(data, gimli::LittleEndian))
     };
-    let dwarf = gimli::Dwarf::load(&load_section).ok()?;
-    addr2line::Context::from_dwarf(dwarf).ok()
+    gimli::Dwarf::load(&load_section).ok()
+}
+
+fn attr_to_string(dwarf: &GimliDwarf<'_>, unit: &gimli::Unit<gimli::EndianSlice<'_, gimli::LittleEndian>>, val: gimli::AttributeValue<gimli::EndianSlice<'_, gimli::LittleEndian>>) -> Option<String> {
+    let s = dwarf.attr_string(unit, val).ok()?;
+    Some(s.to_string_lossy().into_owned())
+}
+
+fn extract_structs(dwarf: &GimliDwarf<'_>) -> Vec<StructDef> {
+    let mut result = Vec::new();
+    let mut units = dwarf.units();
+    while let Ok(Some(header)) = units.next() {
+        let Ok(unit) = dwarf.unit(header) else { continue };
+        let mut cursor = unit.entries();
+
+        while let Ok(Some(entry)) = cursor.next_dfs() {
+            if entry.tag() != gimli::DW_TAG_structure_type {
+                continue;
+            }
+            let Some(name) = entry.attr_value(gimli::DW_AT_name).and_then(|v| attr_to_string(dwarf, &unit, v)) else {
+                continue;
+            };
+            let entry_offset = entry.offset();
+
+            let mut fields = Vec::new();
+            let Ok(mut child_cursor) = unit.entries_at_offset(entry_offset) else {
+                continue;
+            };
+            let _ = child_cursor.next_dfs();
+            while let Ok(Some(child)) = child_cursor.next_dfs() {
+                if child.tag() != gimli::DW_TAG_member {
+                    break;
+                }
+                let field_name = child.attr_value(gimli::DW_AT_name).and_then(|v| attr_to_string(dwarf, &unit, v));
+                let offset = child.attr_value(gimli::DW_AT_data_member_location).and_then(|v| v.udata_value());
+                let byte_size = child.attr_value(gimli::DW_AT_type).and_then(|v| {
+                    let type_offset = match v {
+                        gimli::AttributeValue::UnitRef(o) => o,
+                        _ => return None,
+                    };
+                    let mut tc = unit.entries_at_offset(type_offset).ok()?;
+                    let te = tc.next_dfs().ok()??;
+                    te.attr_value(gimli::DW_AT_byte_size).and_then(|v| v.udata_value())
+                });
+
+                if let (Some(name), Some(off), Some(size)) = (field_name, offset, byte_size)
+                    && matches!(size, 1 | 2 | 4 | 8)
+                {
+                    fields.push(StructField { name, offset: off, byte_size: size });
+                }
+            }
+
+            if !fields.is_empty() {
+                result.push(StructDef { name, fields });
+            }
+        }
+    }
+    result
 }
 
 fn lookup_source_loc(ctx: &Option<Addr2LineCtx>, addr: u64) -> Option<SourceLoc> {
