@@ -61,6 +61,8 @@ type abs_type =
   | TScalar    (* plain integer value *)
   | TFramePtr  (* stack frame pointer *)
   | TMapPtr    (* map value pointer *)
+  | TRingBufPtr (* ring buffer pointer — writable, nullable *)
+  | TCtxPtr    (* context pointer — valid, non-null, read-only *)
   | TNull      (* null pointer *)
   | TUnknown   (* unknown type -- conservative *)
 
@@ -83,7 +85,9 @@ let ts_set (abs: abs_state_ts) (r: reg_idx) (t: abs_type) : abs_state_ts =
    the programme hasn't computed anything yet, so we can't say what
    type they hold. *)
 let ts_init : abs_state_ts =
-  fun r -> if r = r10 then TFramePtr else TUnknown
+  fun r -> if r = r10 then TFramePtr
+           else if r = r1 then TCtxPtr
+           else TUnknown
 
 (* --- Helper predicates ---
    These encode the type constraints for different instruction classes.
@@ -101,14 +105,14 @@ let is_scalar_type (t: abs_type) : bool =
    map values. TUnknown is allowed conservatively. Scalar and Null are
    never valid load bases -- dereferencing them is UB. *)
 let is_load_base (t: abs_type) : bool =
-  match t with | TFramePtr -> true | TMapPtr -> true | TUnknown -> true | _ -> false
+  match t with | TFramePtr -> true | TMapPtr -> true | TRingBufPtr -> true | TCtxPtr -> true | TUnknown -> true | _ -> false
 
 (* Can this type be used as a base register for a memory store?
    In our model, only stack stores (through FramePtr) are supported.
    Map value stores aren't modelled yet. TUnknown is allowed
    conservatively. *)
 let is_store_base (t: abs_type) : bool =
-  match t with | TFramePtr -> true | TUnknown -> true | _ -> false
+  match t with | TFramePtr -> true | TRingBufPtr -> true | TUnknown -> true | _ -> false
 
 (* --- Per-instruction abstract transfer function ---
    Given the current abstract type state and one instruction, compute the
@@ -145,6 +149,7 @@ let check_insn_ts (abs: abs_state_ts) (insn: bpf_insn) : option abs_state_ts =
      | ADD ->
        (match ts_get abs dst with
         | TFramePtr -> Some (ts_set abs dst TFramePtr)
+        | TCtxPtr   -> Some (ts_set abs dst TCtxPtr)
         | TScalar   -> Some (ts_set abs dst TScalar)
         | TUnknown  -> Some (ts_set abs dst TUnknown)
         | _         -> None)
@@ -152,6 +157,7 @@ let check_insn_ts (abs: abs_state_ts) (insn: bpf_insn) : option abs_state_ts =
      | SUB ->
        (match ts_get abs dst with
         | TFramePtr -> Some (ts_set abs dst TFramePtr)
+        | TCtxPtr   -> Some (ts_set abs dst TCtxPtr)
         | TScalar   -> Some (ts_set abs dst TScalar)
         | TUnknown  -> Some (ts_set abs dst TUnknown)
         | _         -> None)
@@ -232,6 +238,7 @@ let check_insn_ts (abs: abs_state_ts) (insn: bpf_insn) : option abs_state_ts =
       | Some spec ->
         (match spec.ret_type with
          | RetMapPtr -> TUnknown
+         | RetRingBufPtr -> TUnknown
          | RetScalar -> TScalar
          | RetErrorCode -> TScalar)
       | None -> TUnknown) in

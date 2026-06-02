@@ -24,6 +24,8 @@ open BPF.Semantics
 (* --- Abstract register domain --- *)
 type abs_reg =
   | AbsFramePtr : int -> abs_reg
+  | AbsCtxPtr : int -> abs_reg
+  | AbsRingBufPtr : nat -> abs_reg
   | AbsOther : abs_reg
 
 (* Function-based abstract state, same pattern as reg_file. *)
@@ -35,7 +37,9 @@ let abs_set (abs: abs_state) (r: reg_idx) (v: abs_reg) : abs_state =
   fun i -> if i = r then v else abs i
 
 let abs_init : abs_state =
-  fun r -> if r = r10 then AbsFramePtr 0 else AbsOther
+  fun r -> if r = r10 then AbsFramePtr 0
+           else if r = r1 then AbsCtxPtr 0
+           else AbsOther
 
 (* --- Branch target map ---
    Function-based map from pc to saved abstract state. Lookup is a
@@ -53,6 +57,8 @@ let empty_targets : target_map = fun _ -> None
 let join_reg (a b: abs_reg) : abs_reg =
   match a, b with
   | AbsFramePtr x, AbsFramePtr y -> if x = y then AbsFramePtr x else AbsOther
+  | AbsCtxPtr x, AbsCtxPtr y -> if x = y then AbsCtxPtr x else AbsOther
+  | AbsRingBufPtr x, AbsRingBufPtr y -> if x = y then AbsRingBufPtr x else AbsOther
   | _, _ -> AbsOther
 
 let join_states (a b: abs_state) : abs_state =
@@ -84,6 +90,8 @@ let check_mem_access (base: abs_reg) (insn_off: Int32.t) (w: mem_width) : bool =
   | AbsFramePtr ptr_off ->
     let eff_off = ptr_off + sign_extend_to_int insn_off in
     stack_offset_valid eff_off w
+  | AbsCtxPtr _ -> true
+  | AbsRingBufPtr _ -> true
   | AbsOther -> true
 
 (* --- Per-instruction transfer function --- *)
@@ -105,11 +113,17 @@ let check_insn_sb (abs: abs_state) (insn: bpf_insn) (pc: int) (targets: target_m
        (match abs_get abs dst with
         | AbsFramePtr off ->
           Some (abs_set abs dst (AbsFramePtr (off + sign_extend_to_int imm)), targets)
+        | AbsCtxPtr off ->
+          Some (abs_set abs dst (AbsCtxPtr (off + sign_extend_to_int imm)), targets)
+        | AbsRingBufPtr _ -> Some (abs_set abs dst AbsOther, targets)
         | AbsOther -> Some (abs_set abs dst AbsOther, targets))
      | SUB ->
        (match abs_get abs dst with
         | AbsFramePtr off ->
           Some (abs_set abs dst (AbsFramePtr (off - sign_extend_to_int imm)), targets)
+        | AbsCtxPtr off ->
+          Some (abs_set abs dst (AbsCtxPtr (off - sign_extend_to_int imm)), targets)
+        | AbsRingBufPtr _ -> Some (abs_set abs dst AbsOther, targets)
         | AbsOther -> Some (abs_set abs dst AbsOther, targets))
      | _ -> Some (abs_set abs dst AbsOther, targets))
 

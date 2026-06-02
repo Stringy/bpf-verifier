@@ -32,7 +32,8 @@ open BPF.Spec
 let program_satisfies (prog: bpf_program) (spec: bpf_spec) : prop =
   forall (init: bpf_state).
     spec_pre spec init ==>
-    (let init_st = { init with pc = 0; regs = set_reg init.regs r10 (FramePtr 0) } in
+    (let init_st = { init with pc = 0;
+         regs = set_reg (set_reg init.regs r10 (FramePtr 0)) r1 (CtxPtr 0) } in
      match exec_program init_st prog (List.Tot.length prog) with
      | Some final_st -> spec_post spec final_st
      | None -> True)

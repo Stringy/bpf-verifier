@@ -102,6 +102,7 @@ let exec_insn_safe (st: bpf_state) (insn: bpf_insn) (ev: safety_evidence) : opti
            | None -> None
            | Some result -> Some (state_set_reg st dst (Scalar result)))
         | FramePtr off -> Some (state_set_reg st dst (FramePtr (off + iv)))
+        | CtxPtr off -> Some (state_set_reg st dst (CtxPtr (off + iv)))
         | _ -> None)
      | SUB ->
        (match dv with
@@ -110,6 +111,7 @@ let exec_insn_safe (st: bpf_state) (insn: bpf_insn) (ev: safety_evidence) : opti
            | None -> None
            | Some result -> Some (state_set_reg st dst (Scalar result)))
         | FramePtr off -> Some (state_set_reg st dst (FramePtr (off - iv)))
+        | CtxPtr off -> Some (state_set_reg st dst (CtxPtr (off - iv)))
         | _ -> None)
      | _ ->
        (match scalar_val dv with
@@ -174,10 +176,13 @@ let exec_insn_safe (st: bpf_state) (insn: bpf_insn) (ev: safety_evidence) : opti
        (match map_value_read st.map_values id with
         | None -> None
         | Some v -> Some (state_set_reg st dst (Scalar v)))
+     | RingBufPtr id ->
+       (match ringbuf_read st.ringbuf id insn_off w with
+        | None -> Some (state_set_reg st dst (Scalar 0uL))
+        | Some v -> Some (state_set_reg st dst (Scalar v)))
+     | CtxPtr _ -> Some (state_set_reg st dst (Scalar 0uL))
      | Null -> None
      | Scalar _ -> None)
-  (* Register-to-memory store through a base pointer.
-     For FramePtr, the stack_safe guard skips the bounds check. *)
   | BPF_STX w dst src off ->
     let base = state_get_reg st dst in
     let insn_off = sign_extend_to_int off in
@@ -187,17 +192,17 @@ let exec_insn_safe (st: bpf_state) (insn: bpf_insn) (ev: safety_evidence) : opti
         | Some v ->
           if ev.stack_safe
           then
-            (* Bounds already verified -- write directly and advance pc.
-               stack_store would do stack_offset_valid + stack_write + pc bump;
-               here we skip the validity check. *)
             Some { st with stack = stack_write st.stack (ptr_off + insn_off) w v; pc = st.pc + 1 }
           else
-            (* No static evidence -- use checked stack_store. *)
             stack_store st (ptr_off + insn_off) w v
         | None -> None)
+     | RingBufPtr id ->
+       (match scalar_val (state_get_reg st src) with
+        | Some v ->
+          Some { st with ringbuf = ringbuf_write st.ringbuf id insn_off w v;
+                         pc = st.pc + 1 }
+        | None -> None)
      | _ -> None)
-  (* Immediate-to-memory store through a base pointer.
-     For FramePtr, the stack_safe guard skips the bounds check. *)
   | BPF_ST w dst off imm ->
     let base = state_get_reg st dst in
     let insn_off = sign_extend_to_int off in
@@ -206,11 +211,13 @@ let exec_insn_safe (st: bpf_state) (insn: bpf_insn) (ev: safety_evidence) : opti
        let v = sign_extend_imm imm in
        if ev.stack_safe
        then
-         (* Bounds already verified -- write directly and advance pc. *)
          Some { st with stack = stack_write st.stack (ptr_off + insn_off) w v; pc = st.pc + 1 }
        else
-         (* No static evidence -- use checked stack_store. *)
          stack_store st (ptr_off + insn_off) w v
+     | RingBufPtr id ->
+       let v = sign_extend_imm imm in
+       Some { st with ringbuf = ringbuf_write st.ringbuf id insn_off w v;
+                      pc = st.pc + 1 }
      | _ -> None)
   | BPF_JMP64_REG op dst src offset ->
     (match reg_val_for_jmp (state_get_reg st dst), reg_val_for_jmp (state_get_reg st src) with
@@ -295,7 +302,8 @@ let rec exec_program_safe (st: bpf_state) (prog: bpf_program) (fuel: nat) (ev: s
 let program_satisfies_safe (prog: bpf_program) (spec: bpf_spec) (ev: safety_evidence) : prop =
   forall (init: bpf_state).
     spec_pre spec init ==>
-    (let init_st = { init with pc = 0; regs = set_reg init.regs r10 (FramePtr 0) } in
+    (let init_st = { init with pc = 0;
+         regs = set_reg (set_reg init.regs r10 (FramePtr 0)) r1 (CtxPtr 0) } in
      match exec_program_safe init_st prog (List.Tot.length prog) ev with
      | Some final_st -> spec_post spec final_st
      | None -> True)

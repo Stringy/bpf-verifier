@@ -23,6 +23,7 @@ open BPF.State
 type helper_ret =
   | RetScalar
   | RetMapPtr
+  | RetRingBufPtr
   | RetErrorCode
 
 (* What side effects the helper has beyond setting r0.
@@ -90,7 +91,7 @@ let get_helper_spec (hid: helper_id) : option helper_spec =
     Some { args_used = [r1; r2]; ret_type = RetErrorCode; side_effect = NoEffect }
   (* Ring buffer operations *)
   | RINGBUF_RESERVE ->
-    Some { args_used = [r1; r2; r3]; ret_type = RetMapPtr; side_effect = NoEffect }
+    Some { args_used = [r1; r2; r3]; ret_type = RetRingBufPtr; side_effect = NoEffect }
   | RINGBUF_SUBMIT ->
     Some { args_used = [r1; r2]; ret_type = RetErrorCode; side_effect = NoEffect }
   | RINGBUF_DISCARD ->
@@ -114,6 +115,13 @@ let exec_helper (st: bpf_state) (spec: helper_spec) : option bpf_state =
     let id = st.next_map_id in
     Some { st with
       regs = set_reg st.regs r0 (MapValuePtr id);
+      pc = st.pc + 1;
+      next_map_id = id + 1;
+      reg_origins = origins' }
+  | RetRingBufPtr ->
+    let id = st.next_map_id in
+    Some { st with
+      regs = set_reg st.regs r0 (RingBufPtr id);
       pc = st.pc + 1;
       next_map_id = id + 1;
       reg_origins = origins' }
@@ -156,6 +164,13 @@ let exec_helper_safe (st: bpf_state) (spec: helper_spec) (null_safe: bool) : opt
         pc = st.pc + 1;
         next_map_id = id + 1;
         reg_origins = origins' }
+  | RetRingBufPtr ->
+    let id = st.next_map_id in
+    Some { st with
+      regs = set_reg st.regs r0 (RingBufPtr id);
+      pc = st.pc + 1;
+      next_map_id = id + 1;
+      reg_origins = origins' }
   | RetScalar ->
     Some { st with
       regs = set_reg st.regs r0 (Scalar 0uL);

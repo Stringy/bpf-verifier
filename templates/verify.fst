@@ -53,7 +53,8 @@ let ns_proof : squash (null_check program = true) =
 (* Diagnostic: which instruction last set r0? *)
 let r0_origin : squash (
   forall (init: bpf_state).
-    let init_st = { init with pc = 0; regs = set_reg init.regs r10 (FramePtr 0) } in
+    let init_st = { init with pc = 0;
+        regs = set_reg (set_reg init.regs r10 (FramePtr 0)) r1 (CtxPtr 0) } in
     (match exec_program init_st program (List.Tot.length program) with
      | Some final_st ->
        let origin = final_st.reg_origins r0 in origin == origin

@@ -5,6 +5,8 @@ use crate::bpf::instruction::{AluOp, BpfInsn, MemWidth, Opcode, Source};
 #[derive(Debug, Clone, PartialEq)]
 pub enum AbsReg {
     FramePtr(i64),
+    CtxPtr(i64),
+    RingBufPtr(u64),
     Other,
 }
 
@@ -18,13 +20,25 @@ impl AbsReg {
                     format!("AbsFramePtr {}", off)
                 }
             }
+            AbsReg::CtxPtr(off) => {
+                if *off < 0 {
+                    format!("AbsCtxPtr ({})", off)
+                } else {
+                    format!("AbsCtxPtr {}", off)
+                }
+            }
+            AbsReg::RingBufPtr(id) => format!("AbsRingBufPtr {}", id),
             AbsReg::Other => "AbsOther".to_string(),
         }
     }
 }
 
 fn default_reg(reg: u8) -> AbsReg {
-    if reg == 10 { AbsReg::FramePtr(0) } else { AbsReg::Other }
+    match reg {
+        10 => AbsReg::FramePtr(0),
+        1 => AbsReg::CtxPtr(0),
+        _ => AbsReg::Other,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -64,12 +78,15 @@ impl RegState {
         for i in 0..11u8 {
             let joined = match (self.get(i), other.get(i)) {
                 (AbsReg::FramePtr(a), AbsReg::FramePtr(b)) if a == b => AbsReg::FramePtr(*a),
+                (AbsReg::CtxPtr(a), AbsReg::CtxPtr(b)) if a == b => AbsReg::CtxPtr(*a),
+                (AbsReg::RingBufPtr(a), AbsReg::RingBufPtr(b)) if a == b => AbsReg::RingBufPtr(*a),
                 _ => AbsReg::Other,
             };
             result.set(i, joined);
         }
-        // r10 is always FramePtr(0)
         result.set(10, AbsReg::FramePtr(0));
+        // Note: r1 is NOT preserved as CtxPtr after joins — helper calls
+        // clobber r1-r5, so the ctx pointer is typically saved to r6-r9
         result
     }
 }
@@ -141,6 +158,8 @@ fn check_mem_access(base: &AbsReg, insn_off: i16, w: MemWidth) -> bool {
             let eff_off = ptr_off + insn_off as i64;
             stack_offset_valid(eff_off, width_bytes(w))
         }
+        AbsReg::CtxPtr(_) => true,
+        AbsReg::RingBufPtr(_) => true,
         AbsReg::Other => true,
     }
 }
@@ -216,14 +235,16 @@ fn transfer(state: &mut RegState, targets: &mut TargetMap, insn: &BpfInsn, pc: u
                 AluOp::Add => {
                     let v = match state.get(dst) {
                         AbsReg::FramePtr(off) => AbsReg::FramePtr(off + insn.imm as i64),
-                        AbsReg::Other => AbsReg::Other,
+                        AbsReg::CtxPtr(off) => AbsReg::CtxPtr(off + insn.imm as i64),
+                        AbsReg::RingBufPtr(_) | AbsReg::Other => AbsReg::Other,
                     };
                     state.set(dst, v);
                 }
                 AluOp::Sub => {
                     let v = match state.get(dst) {
                         AbsReg::FramePtr(off) => AbsReg::FramePtr(off - insn.imm as i64),
-                        AbsReg::Other => AbsReg::Other,
+                        AbsReg::CtxPtr(off) => AbsReg::CtxPtr(off - insn.imm as i64),
+                        AbsReg::RingBufPtr(_) | AbsReg::Other => AbsReg::Other,
                     };
                     state.set(dst, v);
                 }

@@ -41,6 +41,8 @@ type reg_val =
   | Scalar : UInt64.t -> reg_val
   | FramePtr : int -> reg_val
   | MapValuePtr : nat -> reg_val
+  | RingBufPtr : nat -> reg_val
+  | CtxPtr : int -> reg_val
   | Null : reg_val
 
 let num_regs : nat = 11
@@ -138,6 +140,36 @@ let rec map_value_read (mem: map_value_mem) (id: nat) : option UInt64.t =
     if mid = id then Some v
     else map_value_read rest id
 
+(* --- Ring buffer memory ---
+   When bpf_ringbuf_reserve returns a non-null pointer, the programme
+   can write event fields at offsets from that pointer. We track these
+   writes so the spec can assert what was written.
+
+   Each entry records (ringbuf_id, offset, width, value). The id comes
+   from the RingBufPtr allocated by RINGBUF_RESERVE. Stores prepend
+   entries; reads scan for the first match — same strategy as stack_mem. *)
+type ringbuf_slot = {
+  rb_id: nat;
+  rb_offset: int;
+  rb_width: mem_width;
+  rb_value: UInt64.t;
+}
+
+type ringbuf_mem = list ringbuf_slot
+
+let rec ringbuf_read (mem: ringbuf_mem) (id: nat) (offset: int) (w: mem_width)
+  : option UInt64.t =
+  match mem with
+  | [] -> None
+  | slot :: rest ->
+    if slot.rb_id = id && slot.rb_offset = offset && slot.rb_width = w
+    then Some slot.rb_value
+    else ringbuf_read rest id offset w
+
+let ringbuf_write (mem: ringbuf_mem) (id: nat) (offset: int) (w: mem_width) (v: UInt64.t)
+  : ringbuf_mem =
+  { rb_id = id; rb_offset = offset; rb_width = w; rb_value = v } :: mem
+
 (* --- Machine state --- *)
 noeq
 type bpf_state = {
@@ -145,6 +177,7 @@ type bpf_state = {
   pc: int;
   stack: stack_mem;
   map_values: map_value_mem;
+  ringbuf: ringbuf_mem;
   next_map_id: nat;
   reg_origins: reg_idx -> nat;
 }

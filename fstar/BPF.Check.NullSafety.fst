@@ -268,6 +268,7 @@ let check_insn_ns (abs: abs_state_ns) (insn: bpf_insn) (pc: int) (targets: targe
       | Some spec ->
         (match spec.ret_type with
          | RetMapPtr -> Unchecked
+         | RetRingBufPtr -> Unchecked
          | RetScalar -> NotMap
          | RetErrorCode -> NotMap)
       | None -> NotMap) in

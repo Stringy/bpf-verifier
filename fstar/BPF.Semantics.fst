@@ -147,6 +147,8 @@ let reg_val_for_jmp (v: reg_val) : option UInt64.t =
   | Scalar n -> Some n
   | Null -> Some 0uL
   | MapValuePtr _ -> None
+  | RingBufPtr _ -> None
+  | CtxPtr _ -> None
   | FramePtr _ -> None
 
 (* Check if a register value is "truthy" for branch purposes.
@@ -156,6 +158,8 @@ let reg_val_is_zero (v: reg_val) : option bool =
   | Scalar n -> Some (n = 0uL)
   | Null -> Some true
   | MapValuePtr _ -> Some false
+  | RingBufPtr _ -> Some false
+  | CtxPtr _ -> Some false
   | FramePtr _ -> Some false
 
 (* Execute one instruction. Returns the new state or None on UB.
@@ -199,6 +203,7 @@ let exec_insn (st: bpf_state) (insn: bpf_insn) : option bpf_state =
            | None -> None
            | Some result -> Some (state_set_reg st dst (Scalar result)))
         | FramePtr off -> Some (state_set_reg st dst (FramePtr (off + iv)))
+        | CtxPtr off -> Some (state_set_reg st dst (CtxPtr (off + iv)))
         | _ -> None)
      | SUB ->
        (match dv with
@@ -207,6 +212,7 @@ let exec_insn (st: bpf_state) (insn: bpf_insn) : option bpf_state =
            | None -> None
            | Some result -> Some (state_set_reg st dst (Scalar result)))
         | FramePtr off -> Some (state_set_reg st dst (FramePtr (off - iv)))
+        | CtxPtr off -> Some (state_set_reg st dst (CtxPtr (off - iv)))
         | _ -> None)
      | _ ->
        (match scalar_val dv with
@@ -261,6 +267,11 @@ let exec_insn (st: bpf_state) (insn: bpf_insn) : option bpf_state =
        (match map_value_read st.map_values id with
         | None -> None
         | Some v -> Some (state_set_reg st dst (Scalar v)))
+     | RingBufPtr id ->
+       (match ringbuf_read st.ringbuf id insn_off w with
+        | None -> Some (state_set_reg st dst (Scalar 0uL))
+        | Some v -> Some (state_set_reg st dst (Scalar v)))
+     | CtxPtr _ -> Some (state_set_reg st dst (Scalar 0uL))
      | Null -> None
      | Scalar _ -> None)
   | BPF_STX w dst src off ->
@@ -271,6 +282,12 @@ let exec_insn (st: bpf_state) (insn: bpf_insn) : option bpf_state =
        (match scalar_val (state_get_reg st src) with
         | Some v -> stack_store st (ptr_off + insn_off) w v
         | None -> None)
+     | RingBufPtr id ->
+       (match scalar_val (state_get_reg st src) with
+        | Some v ->
+          Some { st with ringbuf = ringbuf_write st.ringbuf id insn_off w v;
+                         pc = st.pc + 1 }
+        | None -> None)
      | _ -> None)
   | BPF_ST w dst off imm ->
     let base = state_get_reg st dst in
@@ -279,6 +296,10 @@ let exec_insn (st: bpf_state) (insn: bpf_insn) : option bpf_state =
      | FramePtr ptr_off ->
        let v = sign_extend_imm imm in
        stack_store st (ptr_off + insn_off) w v
+     | RingBufPtr id ->
+       let v = sign_extend_imm imm in
+       Some { st with ringbuf = ringbuf_write st.ringbuf id insn_off w v;
+                      pc = st.pc + 1 }
      | _ -> None)
   | BPF_JMP64_REG op dst src offset ->
     (match reg_val_for_jmp (state_get_reg st dst), reg_val_for_jmp (state_get_reg st src) with

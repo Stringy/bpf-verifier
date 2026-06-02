@@ -20,7 +20,9 @@ open BPF.Check.StackBounds
    (r10 = AbsFramePtr 0, all others = AbsOther). *)
 let rec to_abs_state_sb (entries: list (nat & abs_reg)) : abs_state =
   fun r -> match entries with
-           | [] -> if r = r10 then AbsFramePtr 0 else AbsOther
+           | [] -> if r = r10 then AbsFramePtr 0
+                   else if r = r1 then AbsCtxPtr 0
+                   else AbsOther
            | (idx, v) :: rest ->
              if r = idx then v else to_abs_state_sb rest r
 

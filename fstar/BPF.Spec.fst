@@ -39,3 +39,21 @@ let with_pre (p: bpf_state -> prop) (spec: bpf_spec) : bpf_spec =
 (* Shorthand: the programme returns a specific scalar value in r0. *)
 let returns_value (v: UInt64.t) : bpf_spec =
   post_only (fun st -> state_get_reg st r0 == Scalar v)
+
+(* Postcondition on ring buffer contents. The predicate receives
+   the ring buffer memory and can assert what was written at which
+   offsets. Use with ringbuf_read to check specific fields:
+
+     ringbuf_written (fun rb ->
+       ringbuf_read rb 0 0 W32 == Some 42uL
+     )
+*)
+let ringbuf_written (p: ringbuf_mem -> prop) : bpf_spec =
+  post_only (fun st -> p st.ringbuf)
+
+(* Combined: returns a value AND ring buffer satisfies a predicate. *)
+let returns_and_writes (v: UInt64.t) (p: ringbuf_mem -> prop) : bpf_spec =
+  post_only (fun st ->
+    state_get_reg st r0 == Scalar v /\
+    p st.ringbuf
+  )
