@@ -98,16 +98,25 @@ let get_helper_spec (hid: helper_id) : option helper_spec =
     Some { args_used = [r1; r2]; ret_type = RetErrorCode; side_effect = NoEffect }
   | UNKNOWN_HELPER _ -> None
 
-(* Execute a BPF helper call given its specification.
-   Dispatches on ret_type to determine what goes in r0:
-   - RetMapPtr: allocates a fresh map value ID and returns MapValuePtr
-   - RetScalar/RetErrorCode: returns Scalar 0uL as a placeholder
-     (the forall in program_satisfies covers all possible return values)
+(* Apply side effects before setting the return value.
+   ReadIntoPtr helpers (probe_read_kernel, get_current_comm, d_path)
+   write data through the r1 pointer. We model this by writing a
+   placeholder 0uL at the destination so subsequent reads succeed.
+   Without this, stack_read returns None and the programme appears
+   to crash at the next load from that address. *)
+let apply_helper_effect (st0: bpf_state) (eff: helper_effect) : bpf_state =
+  match eff with
+  | ReadIntoPtr ->
+    (match state_get_reg st0 r1 with
+     | FramePtr off -> { st0 with stack = stack_write st0.stack off W64 0uL }
+     | _ -> st0)
+  | _ -> st0
 
-   Note: we only set r0 and advance pc. We do NOT clobber r1-r5 here
-   because the original exec_insn didn't -- the safety checkers handle
-   caller-saved clobbering in their abstract state independently. *)
-let exec_helper (st: bpf_state) (spec: helper_spec) : option bpf_state =
+(* Execute a BPF helper call given its specification.
+   First applies side effects (ReadIntoPtr writes through r1),
+   then dispatches on ret_type to determine what goes in r0. *)
+let exec_helper (st0: bpf_state) (spec: helper_spec) : option bpf_state =
+  let st = apply_helper_effect st0 spec.side_effect in
   let origin = if st.pc >= 0 then st.pc else 0 in
   let origins' = fun i -> if i = r0 then origin else st.reg_origins i in
   match spec.ret_type with
@@ -144,7 +153,8 @@ let exec_helper (st: bpf_state) (spec: helper_spec) : option bpf_state =
 
    Takes a bool rather than safety_evidence to avoid a circular
    dependency -- BPF.Exec.Safe imports us, so we can't import it. *)
-let exec_helper_safe (st: bpf_state) (spec: helper_spec) (null_safe: bool) : option bpf_state =
+let exec_helper_safe (st0: bpf_state) (spec: helper_spec) (null_safe: bool) : option bpf_state =
+  let st = apply_helper_effect st0 spec.side_effect in
   let origin = if st.pc >= 0 then st.pc else 0 in
   let origins' = fun i -> if i = r0 then origin else st.reg_origins i in
   match spec.ret_type with

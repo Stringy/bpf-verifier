@@ -80,7 +80,7 @@ let extract_counterexample () : Tac unit =
    for deterministic programmes. Breaks on non-determinism because
    option constructors get over-normalised. *)
 let bpf_auto_pure () : Tac unit =
-  norm [delta; iota; zeta; primops];
+  norm [nbe; delta; iota; zeta; primops];
   dump "NORMALISED_GOAL";
   extract_counterexample ();
   smt ()
@@ -90,7 +90,7 @@ let bpf_auto_pure () : Tac unit =
    programmes (map lookups) but is slower because some terms remain
    symbolic for Z3 to process. *)
 let bpf_auto_map () : Tac unit =
-  norm [delta_namespace ["BPF"; "Verify_"; "Prims";
+  norm [nbe; delta_namespace ["BPF"; "Verify_"; "Prims";
                          "FStar.UInt64"; "FStar.UInt32"; "FStar.UInt8"; "FStar.UInt";
                          "FStar.Int32"; "FStar.Int64"; "FStar.Int";
                          "FStar.Int.Cast"; "FStar.Int.Cast.Full";

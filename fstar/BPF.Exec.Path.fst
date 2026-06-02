@@ -44,8 +44,9 @@ type path_schedule = list path_choice
    Returns the updated state AND the remaining schedule (tail).
    Non-nullable helpers (RetScalar, RetErrorCode) don't consume
    a choice — the schedule passes through unchanged. *)
-let exec_helper_path (st: bpf_state) (spec: helper_spec) (sched: path_schedule)
+let exec_helper_path (st0: bpf_state) (spec: helper_spec) (sched: path_schedule)
   : option bpf_state & path_schedule =
+  let st = apply_helper_effect st0 spec.side_effect in
   let origin = if st.pc >= 0 then st.pc else 0 in
   let origins' = fun i -> if i = r0 then origin else st.reg_origins i in
   match spec.ret_type with
