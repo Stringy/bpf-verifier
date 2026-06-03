@@ -40,6 +40,7 @@ pub struct StructField {
 #[derive(Debug, Clone)]
 pub struct StructDef {
     pub name: String,
+    pub is_user_defined: bool,
     pub fields: Vec<StructField>,
 }
 
@@ -149,6 +150,7 @@ fn extract_structs(dwarf: &GimliDwarf<'_>) -> Vec<StructDef> {
             let Some(name) = entry.attr_value(gimli::DW_AT_name).and_then(|v| attr_to_string(dwarf, &unit, v)) else {
                 continue;
             };
+            let is_user_struct = true;
             let entry_offset = entry.offset();
 
             let mut fields = Vec::new();
@@ -180,7 +182,7 @@ fn extract_structs(dwarf: &GimliDwarf<'_>) -> Vec<StructDef> {
             }
 
             if !fields.is_empty() {
-                result.push(StructDef { name, fields });
+                result.push(StructDef { name, is_user_defined: is_user_struct, fields });
             }
         }
     }
