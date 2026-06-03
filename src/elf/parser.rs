@@ -138,51 +138,122 @@ fn attr_to_string(dwarf: &GimliDwarf<'_>, unit: &gimli::Unit<gimli::EndianSlice<
 
 fn extract_structs(dwarf: &GimliDwarf<'_>) -> Vec<StructDef> {
     let mut result = Vec::new();
+    let mut type_sizes: std::collections::HashMap<usize, u64> = std::collections::HashMap::new();
+    let mut type_refs: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+
+    let mut units = dwarf.units();
+    while let Ok(Some(header)) = units.next() {
+        let Ok(unit) = dwarf.unit(header) else { continue };
+        let mut cursor = unit.entries();
+        while let Ok(Some(entry)) = cursor.next_dfs() {
+            let offset = entry.offset().0;
+            if let Some(sz) = entry.attr_value(gimli::DW_AT_byte_size)
+                .and_then(|v| v.udata_value())
+            {
+                type_sizes.insert(offset, sz);
+            }
+            if let Some(gimli::AttributeValue::UnitRef(target)) = entry.attr_value(gimli::DW_AT_type) {
+                type_refs.insert(offset, target.0);
+            }
+        }
+    }
+
     let mut units = dwarf.units();
     while let Ok(Some(header)) = units.next() {
         let Ok(unit) = dwarf.unit(header) else { continue };
         let mut cursor = unit.entries();
 
+        let mut current_struct: Option<(String, bool)> = None;
+        let mut current_fields: Vec<StructField> = Vec::new();
+
         while let Ok(Some(entry)) = cursor.next_dfs() {
-            if entry.tag() != gimli::DW_TAG_structure_type {
-                continue;
-            }
-            let Some(name) = entry.attr_value(gimli::DW_AT_name).and_then(|v| attr_to_string(dwarf, &unit, v)) else {
-                continue;
-            };
-            let is_user_struct = true;
-            let entry_offset = entry.offset();
-
-            let mut fields = Vec::new();
-            let Ok(mut child_cursor) = unit.entries_at_offset(entry_offset) else {
-                continue;
-            };
-            let _ = child_cursor.next_dfs();
-            while let Ok(Some(child)) = child_cursor.next_dfs() {
-                if child.tag() != gimli::DW_TAG_member {
-                    break;
+            match entry.tag() {
+                gimli::DW_TAG_structure_type => {
+                    if let Some((name, is_user)) = current_struct.take() {
+                        if !current_fields.is_empty() {
+                            result.push(StructDef {
+                                name,
+                                is_user_defined: is_user,
+                                fields: std::mem::take(&mut current_fields),
+                            });
+                        }
+                    }
+                    current_fields.clear();
+                    if let Some(name) = entry.attr_value(gimli::DW_AT_name)
+                        .and_then(|v| attr_to_string(dwarf, &unit, v))
+                    {
+                        let decl_file = entry.attr_value(gimli::DW_AT_decl_file);
+                        let is_user = decl_file
+                            .map(|fv| match fv {
+                                gimli::AttributeValue::FileIndex(i) => i == 0,
+                                other => other.udata_value() == Some(0),
+                            })
+                            .unwrap_or(false);
+                        current_struct = Some((name, is_user));
+                    }
                 }
-                let field_name = child.attr_value(gimli::DW_AT_name).and_then(|v| attr_to_string(dwarf, &unit, v));
-                let offset = child.attr_value(gimli::DW_AT_data_member_location).and_then(|v| v.udata_value());
-                let byte_size = child.attr_value(gimli::DW_AT_type).and_then(|v| {
-                    let type_offset = match v {
-                        gimli::AttributeValue::UnitRef(o) => o,
-                        _ => return None,
-                    };
-                    let mut tc = unit.entries_at_offset(type_offset).ok()?;
-                    let te = tc.next_dfs().ok()??;
-                    te.attr_value(gimli::DW_AT_byte_size).and_then(|v| v.udata_value())
+                gimli::DW_TAG_member if current_struct.is_some() => {
+                    if let Some((_, ref mut is_user)) = current_struct {
+                        if !*is_user {
+                            if let Some(fv) = entry.attr_value(gimli::DW_AT_decl_file) {
+                                let idx = match fv {
+                                    gimli::AttributeValue::FileIndex(i) => Some(i),
+                                    other => other.udata_value(),
+                                };
+                                if idx == Some(0) {
+                                    *is_user = true;
+                                }
+                            }
+                        }
+                    }
+                    let field_name = entry.attr_value(gimli::DW_AT_name)
+                        .and_then(|v| attr_to_string(dwarf, &unit, v));
+                    let field_offset = entry.attr_value(gimli::DW_AT_data_member_location)
+                        .and_then(|v| v.udata_value());
+                    let byte_size = entry.attr_value(gimli::DW_AT_type).and_then(|v| {
+                        let mut cur = match v {
+                            gimli::AttributeValue::UnitRef(o) => o.0,
+                            _ => return None,
+                        };
+                        for _ in 0..10 {
+                            if let Some(&sz) = type_sizes.get(&cur) {
+                                return Some(sz);
+                            }
+                            match type_refs.get(&cur) {
+                                Some(&next) => cur = next,
+                                None => return None,
+                            }
+                        }
+                        None
+                    });
+                    if let (Some(name), Some(off), Some(size)) = (field_name, field_offset, byte_size)
+                        && matches!(size, 1 | 2 | 4 | 8)
+                    {
+                        current_fields.push(StructField { name, offset: off, byte_size: size });
+                    }
+                }
+                _ => {
+                    if current_struct.is_some() && entry.tag() != gimli::DW_TAG_member {
+                        if let Some((name, is_user)) = current_struct.take() {
+                            if !current_fields.is_empty() {
+                                result.push(StructDef {
+                                    name,
+                                    is_user_defined: is_user,
+                                    fields: std::mem::take(&mut current_fields),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((name, is_user)) = current_struct.take() {
+            if !current_fields.is_empty() {
+                result.push(StructDef {
+                    name,
+                    is_user_defined: is_user,
+                    fields: current_fields,
                 });
-
-                if let (Some(name), Some(off), Some(size)) = (field_name, offset, byte_size)
-                    && matches!(size, 1 | 2 | 4 | 8)
-                {
-                    fields.push(StructField { name, offset: off, byte_size: size });
-                }
-            }
-
-            if !fields.is_empty() {
-                result.push(StructDef { name, is_user_defined: is_user_struct, fields });
             }
         }
     }

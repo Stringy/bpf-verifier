@@ -85,14 +85,11 @@ fn width_fstar(byte_size: u64) -> &'static str {
 }
 
 fn generate_struct_accessors(structs: &[StructDef]) -> Vec<String> {
-    let user_structs: Vec<_> = structs.iter()
-        .filter(|s| !s.fields.is_empty() && s.fields.len() <= 8)
-        .collect();
-    if user_structs.len() > 20 {
-        return Vec::new();
-    }
     let mut accessors = Vec::new();
-    for s in user_structs {
+    for s in structs {
+        if !s.is_user_defined {
+            continue;
+        }
         accessors.push(format!("(* Field accessors for struct {} *)", s.name));
         for f in &s.fields {
             accessors.push(format!(
@@ -109,13 +106,10 @@ pub fn generate_fields_module(structs: &[StructDef]) -> String {
     out.push_str("module Fields\n\n");
     out.push_str("open FStar.UInt64\n");
     out.push_str("open BPF.State\n\n");
-    let user_structs: Vec<_> = structs.iter()
-        .filter(|s| !s.fields.is_empty() && s.fields.len() <= 8)
-        .collect();
-    if user_structs.len() > 20 {
-        return out;
-    }
-    for s in user_structs {
+    for s in structs {
+        if !s.is_user_defined {
+            continue;
+        }
         writeln!(out, "(* struct {} *)", s.name).unwrap();
         for f in &s.fields {
             writeln!(
