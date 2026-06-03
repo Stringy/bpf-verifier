@@ -210,6 +210,9 @@ fn extract_structs(dwarf: &GimliDwarf<'_>) -> Vec<StructDef> {
                         .and_then(|v| attr_to_string(dwarf, &unit, v));
                     let field_offset = entry.attr_value(gimli::DW_AT_data_member_location)
                         .and_then(|v| v.udata_value());
+                    // Chase typedef/const/volatile chains to find the
+                    // underlying type's byte_size. Depth-limited to 10 to
+                    // guard against circular references in malformed DWARF.
                     let byte_size = entry.attr_value(gimli::DW_AT_type).and_then(|v| {
                         let mut cur = match v {
                             gimli::AttributeValue::UnitRef(o) => o.0,

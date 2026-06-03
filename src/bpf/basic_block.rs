@@ -27,15 +27,15 @@ pub fn find_basic_blocks(instructions: &[BpfInsn]) -> Vec<BasicBlock> {
     for (i, insn) in instructions.iter().enumerate() {
         match insn.opcode {
             Opcode::JmpJa => {
-                let target = (i as isize + 1 + insn.offset as isize) as usize;
-                if target < instructions.len() {
-                    leaders[target] = true;
+                let target = i as isize + 1 + insn.offset as isize;
+                if target >= 0 && (target as usize) < instructions.len() {
+                    leaders[target as usize] = true;
                 }
             }
             Opcode::Jmp64(_, _) | Opcode::Jmp32(_, _) => {
-                let target = (i as isize + 1 + insn.offset as isize) as usize;
-                if target < instructions.len() {
-                    leaders[target] = true;
+                let target = i as isize + 1 + insn.offset as isize;
+                if target >= 0 && (target as usize) < instructions.len() {
+                    leaders[target as usize] = true;
                 }
                 if i + 1 < instructions.len() {
                     leaders[i + 1] = true;

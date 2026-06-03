@@ -49,6 +49,7 @@ let num_regs : nat = 11
 
 type reg_idx = r:nat{r < num_regs}
 
+(* Individual bindings so F* inlines them during normalisation. *)
 let r0  : reg_idx = 0
 let r1  : reg_idx = 1
 let r2  : reg_idx = 2

@@ -47,17 +47,3 @@ let program_satisfies_chunked (exec_fn: bpf_state -> option bpf_state) (spec: bp
     (match exec_fn init with
      | Some final_st -> spec_post spec final_st
      | None -> True)
-
-(* --- CO-RE relocation stubs ---
-   Placeholder types for Milestone E. Currently trivial (no relocations). *)
-type layout_constraints = unit
-
-let trivial_constraints : layout_constraints = ()
-
-let relocate (prog: bpf_program) (_lc: layout_constraints) : bpf_program = prog
-
-let for_all_layouts
-  (constraints: layout_constraints)
-  (prop_fn: bpf_program -> prop)
-  (prog: bpf_program) : prop =
-  prop_fn (relocate prog constraints)
