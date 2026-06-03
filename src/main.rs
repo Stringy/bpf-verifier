@@ -47,6 +47,49 @@ enum Commands {
     },
 }
 
+fn resolve_spec_module(spec_path: Option<&Path>) -> (String, String) {
+    if let Some(path) = spec_path {
+        let module = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Spec");
+        (module.to_string(), "spec".to_string())
+    } else {
+        ("BPF.DefaultSpec".to_string(), "spec".to_string())
+    }
+}
+
+fn find_program<'a>(
+    programs: &'a [BpfProgram],
+    section: Option<&str>,
+) -> Result<&'a BpfProgram, String> {
+    let available = || {
+        programs
+            .iter()
+            .map(|p| p.section_name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    match section {
+        Some(name) => programs
+            .iter()
+            .find(|p| p.section_name == name)
+            .ok_or_else(|| {
+                format!(
+                    "section '{name}' not found. available: {}",
+                    available()
+                )
+            }),
+        None if programs.len() == 1 => Ok(&programs[0]),
+        None if programs.is_empty() => Err("no programme sections found".to_string()),
+        None => Err(format!(
+            "multiple programme sections found, use --section to select one: {}",
+            available()
+        )),
+    }
+}
+
 fn project_root() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         let mut dir = exe.parent().map(Path::to_path_buf);
@@ -131,42 +174,16 @@ fn run_codegen(
         }
     };
 
-    let prog = if let Some(name) = section {
-        match bpf_object.programs.iter().find(|p| p.section_name == name) {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "error: section '{}' not found. available: {}",
-                    name,
-                    bpf_object.programs.iter()
-                        .map(|p| p.section_name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-                return 2;
-            }
-        }
-    } else {
-        match bpf_object.programs.first() {
-            Some(p) => p,
-            None => {
-                eprintln!("error: no program sections in {}", program_path.display());
-                return 2;
-            }
+    let prog = match find_program(&bpf_object.programs, section) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
         }
     };
 
     let safe_name = prog.section_name.replace('/', "_");
-
-    let (spec_module, spec_name) = if let Some(path) = spec_path {
-        let module = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Spec");
-        (module.to_string(), "spec".to_string())
-    } else {
-        ("BPF.DefaultSpec".to_string(), "spec".to_string())
-    };
+    let (spec_module, spec_name) = resolve_spec_module(spec_path);
 
     let sb_witness = stack_bounds::analyse(&prog.instructions);
     if !sb_witness.passed {
@@ -211,7 +228,7 @@ fn run_verify(
     };
 
     if bpf_object.programs.is_empty() {
-        eprintln!("error: no program sections in {}", program_path.display());
+        eprintln!("error: no programme sections in {}", program_path.display());
         return 2;
     }
 
@@ -220,19 +237,10 @@ fn run_verify(
     } else {
         let mut selected = Vec::new();
         for name in sections {
-            match bpf_object.programs.iter().find(|p| p.section_name == *name) {
-                Some(p) => selected.push(p),
-                None => {
-                    eprintln!(
-                        "error: section '{}' not found. available: {}",
-                        name,
-                        bpf_object
-                            .programs
-                            .iter()
-                            .map(|p| p.section_name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
+            match find_program(&bpf_object.programs, Some(name)) {
+                Ok(p) => selected.push(p),
+                Err(e) => {
+                    eprintln!("error: {e}");
                     return 2;
                 }
             }
@@ -294,15 +302,7 @@ fn verify_program(
     let program_name = &prog.section_name;
     let safe_name = program_name.replace('/', "_");
 
-    let (spec_module, spec_name) = if let Some(path) = spec_path {
-        let module = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Spec");
-        (module.to_string(), "spec".to_string())
-    } else {
-        ("BPF.DefaultSpec".to_string(), "spec".to_string())
-    };
+    let (spec_module, spec_name) = resolve_spec_module(spec_path);
 
     let sb_witness = stack_bounds::analyse(&prog.instructions);
     if !sb_witness.passed {
@@ -373,6 +373,7 @@ fn verify_program(
                 spec_filename,
                 spec_content.as_deref(),
             ) {
+                diag = diag.with_struct_fields(structs);
                 if let Some(ref origin) = diag.r0_origin
                     && let Some(ref loc) = origin.source_loc
                     && let Some((path, content)) =

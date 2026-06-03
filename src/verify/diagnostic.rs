@@ -1,3 +1,9 @@
+//! Diagnostic rendering for verification failures.
+//!
+//! When F* fails to prove a spec, this module parses F*'s stderr output
+//! (a mix of JSON error messages and tactic dump blocks) to produce
+//! human-readable errors with source annotations via ariadne.
+
 use std::path::Path;
 
 use ariadne::{CharSet, Config, Label, Report, ReportKind};
@@ -9,6 +15,14 @@ pub struct DumpBlock {
     pub goal: String,
 }
 
+/// Extract labeled dump blocks from F* tactic output.
+///
+/// F* tactics emit dumps via `dump "LABEL"`, which appear on stderr as:
+/// ```text
+/// proof-state: State dump @ depth 0 (LABEL):
+/// ...
+///   |- _ : squash (...)
+/// ```
 pub fn parse_dumps(stderr: &str) -> Vec<DumpBlock> {
     let mut dumps = Vec::new();
     let lines: Vec<&str> = stderr.lines().collect();
@@ -75,12 +89,11 @@ pub fn parse_dumps(stderr: &str) -> Vec<DumpBlock> {
     dumps
 }
 
+/// Extract the label from a dump header like "proof-state: State dump @ depth 0 (LABEL):".
 fn extract_dump_label(line: &str) -> Option<String> {
-    line.find('(')
-        .and_then(|start| {
-            line[start + 1..].find(')')
-                .map(|end| line[start + 1..start + 1 + end].to_string())
-        })
+    let start = line.find('(')? + 1;
+    let end = start + line[start..].find(')')?;
+    Some(line[start..end].to_string())
 }
 
 /// Represents which proof stage failed during F* verification.
@@ -103,58 +116,64 @@ impl std::fmt::Display for FailedStage {
     }
 }
 
+/// Determine which verification stage failed from F* output.
+///
+/// Primary detection uses the last dump label (we control these strings
+/// in our tactic code). Falls back to JSON error context for proofs
+/// that don't emit dumps (e.g. `assert_norm` for stack bounds).
 pub fn parse_failed_stage(stderr: &str) -> Option<FailedStage> {
+    // Primary: use the last dump label before the first error. F* stops at
+    // the first error, so the last dump is always from the failing stage.
+    // Dump labels are strings we define in our tactic code, not F* internals.
+    let dumps = parse_dumps(stderr);
+    let has_error = stderr.contains("Error") || stderr.contains("Assertion failed");
+    if has_error {
+        if let Some(last) = dumps.last() {
+            let stage = match last.label.as_str() {
+                "NORMALISED_GOAL" => Some(FailedStage::FunctionalCorrectness),
+                "STACK_BOUNDS_GOAL" => Some(FailedStage::StackBounds),
+                "TYPE_SAFETY_GOAL" => Some(FailedStage::TypeSafety),
+                "NULL_SAFETY_GOAL" => Some(FailedStage::NullSafety),
+                _ => None,
+            };
+            if stage.is_some() {
+                return stage;
+            }
+        }
+    }
+
+    // Fallback: check JSON error context. This handles cases where the
+    // failing proof doesn't use a tactic with dump (e.g. assert_norm for
+    // stack bounds, or when dump was not yet added to a proof block).
     for line in stderr.lines() {
         if !line.starts_with('{') {
             continue;
         }
-
         let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-
         if json.get("level").and_then(|v| v.as_str()) != Some("Error") {
             continue;
         }
-
         let Some(ctx) = json.get("ctx").and_then(|v| v.as_array()) else {
             continue;
         };
-
         for ctx_item in ctx {
-            let Some(ctx_str) = ctx_item.as_str() else {
-                continue;
-            };
-
-            if ctx_str.contains("`let proof`") || ctx_str.contains("`let proof_path_") {
-                return Some(FailedStage::FunctionalCorrectness);
-            }
-            if ctx_str.contains("`let ts_proof`") {
-                return Some(FailedStage::TypeSafety);
-            }
-            if ctx_str.contains("`let ns_proof`") {
-                return Some(FailedStage::NullSafety);
-            }
-            if ctx_str.contains("`let sb_proof`") || ctx_str.contains("assert_norm") {
-                return Some(FailedStage::StackBounds);
+            if let Some(ctx_str) = ctx_item.as_str() {
+                if ctx_str.contains("assert_norm") || ctx_str.contains("`let sb_proof`") {
+                    return Some(FailedStage::StackBounds);
+                }
+                if ctx_str.contains("`let ts_proof`") {
+                    return Some(FailedStage::TypeSafety);
+                }
+                if ctx_str.contains("`let ns_proof`") {
+                    return Some(FailedStage::NullSafety);
+                }
             }
         }
     }
 
-    let dumps = parse_dumps(stderr);
-    if (stderr.contains("Error") || stderr.contains("Assertion failed"))
-        && let Some(last) = dumps.last()
-    {
-        return match last.label.as_str() {
-            "NORMALISED_GOAL" => Some(FailedStage::FunctionalCorrectness),
-            "STACK_BOUNDS_GOAL" => Some(FailedStage::StackBounds),
-            "TYPE_SAFETY_GOAL" => Some(FailedStage::TypeSafety),
-            "NULL_SAFETY_GOAL" => Some(FailedStage::NullSafety),
-            _ => None,
-        };
-    }
-
-    None
+    if has_error { Some(FailedStage::FunctionalCorrectness) } else { None }
 }
 
 /// Spec postcondition extracted from a spec file.
@@ -251,6 +270,174 @@ pub fn extract_instruction_at_pc(generated_source: &str, pc: usize) -> Option<In
     None
 }
 
+/// A single conjunct from the normalised postcondition, emitted by the
+/// diagnose_conjuncts F* tactic as TAC>> CONJUNCT|<disjunct>|<text>.
+#[derive(Debug, Clone)]
+pub struct ConjunctInfo {
+    pub disjunct: usize,
+    pub text: String,
+}
+
+/// Parse `CONJUNCT|<disjunct>|<text>` lines from F* tactic output.
+///
+/// The `diagnose_conjuncts` tactic walks the normalised postcondition,
+/// splitting on `/\` (conjunction) and `\/` (disjunction), and prints
+/// each leaf conjunct with its disjunct index. This gives us the full
+/// structure of the postcondition for display.
+pub fn parse_conjuncts(stderr: &str) -> Vec<ConjunctInfo> {
+    let mut conjuncts = Vec::new();
+    for line in stderr.lines() {
+        let stripped = line.strip_prefix("TAC>> CONJUNCT|")
+            .or_else(|| line.strip_prefix("CONJUNCT|"));
+        if let Some(rest) = stripped {
+            if let Some((idx_str, text)) = rest.split_once('|') {
+                if let Ok(disjunct) = idx_str.parse::<usize>() {
+                    conjuncts.push(ConjunctInfo {
+                        disjunct,
+                        text: simplify_conjunct(text),
+                    });
+                }
+            }
+        }
+    }
+    conjuncts
+}
+
+// --- Conjunct simplification ---
+//
+// After full normalisation, F* terms are verbose: field accessors
+// expand to raw ringbuf_read_any calls, Scalar wrappers appear around
+// integer literals, and Some? checks expand to match expressions.
+// These functions translate back to the user-facing vocabulary.
+
+/// Simplify a normalised F* conjunct for human display.
+/// Transforms e.g. `Eq (reg_val) (Scalar 42uL) (Scalar 0uL)` → `42uL == 0uL`.
+fn simplify_conjunct(text: &str) -> String {
+    // Eq (type) (lhs) (rhs) → lhs == rhs
+    if let Some(rest) = text.strip_prefix("Eq ") {
+        if let Some(after_type) = skip_parens(rest) {
+            let after_type = after_type.trim_start();
+            if let Some((lhs, rhs)) = split_top_level_terms(after_type) {
+                let lhs = simplify_term(lhs.trim());
+                let rhs = simplify_term(rhs.trim());
+                // "Some? (...) == true" → "Some? (...)"
+                if rhs == "true" && lhs.starts_with("Some?") {
+                    return lhs;
+                }
+                return format!("{lhs} == {rhs}");
+            }
+        }
+    }
+    simplify_term(text)
+}
+
+/// Returns true if a simplified conjunct is trivially true (both sides equal).
+fn is_trivially_true(text: &str) -> bool {
+    if let Some((lhs, rhs)) = text.split_once(" == ") {
+        return lhs == rhs;
+    }
+    false
+}
+
+// --- Parenthesis-aware string helpers for F* term parsing ---
+
+/// Find the closing ')' that matches the opening '(' at position 0.
+/// Returns the byte index of the closing paren, or None if unbalanced.
+fn find_matching_close(s: &str) -> Option<usize> {
+    debug_assert!(s.starts_with('('));
+    let mut depth = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Skip a parenthesised group (or a single bare token) at the start of `s`.
+/// Returns the remainder after the group.
+fn skip_parens(s: &str) -> Option<&str> {
+    if s.starts_with('(') {
+        let close = find_matching_close(s)?;
+        Some(&s[close + 1..])
+    } else {
+        s.split_once(' ').map(|(_, rest)| rest)
+    }
+}
+
+/// Split "(<first>) (<second>)" into the inner contents of each group.
+/// The second group may or may not be parenthesised.
+fn split_top_level_terms(s: &str) -> Option<(&str, &str)> {
+    if !s.starts_with('(') {
+        return None;
+    }
+    let close = find_matching_close(s)?;
+    let first = &s[1..close];
+    let rest = s[close + 1..].trim_start();
+    let second = rest.strip_prefix('(')
+        .and_then(|inner| inner.strip_suffix(')'))
+        .unwrap_or(rest);
+    Some((first, second))
+}
+
+/// Simplify a single normalised F* term for display.
+fn simplify_term(s: &str) -> String {
+    // "Scalar NuL" → "N"
+    if let Some(rest) = s.strip_prefix("Scalar ") {
+        return rest.to_string();
+    }
+
+    // Recognise ringbuf_read_any patterns:
+    // "match ringbuf_read_any ... <offset> <width> with | ... Some _ -> true | _ -> false"
+    // → "Some? (ringbuf_read_any rb <offset> <width>)"
+    if s.contains("ringbuf_read_any") && s.contains("Some _") {
+        // Find width token (W8/W16/W32/W64) — it's always the last arg before `with`
+        for width in ["W64", "W32", "W16", "W8"] {
+            if let Some(w_pos) = s.find(width) {
+                // Offset is the token just before the width
+                let before = s[..w_pos].trim();
+                if let Some(off_start) = before.rfind(|c: char| !c.is_ascii_digit()) {
+                    let offset = before[off_start + 1..].trim();
+                    if !offset.is_empty() {
+                        return format!("Some? (ringbuf_read_any rb {offset} {width})");
+                    }
+                }
+            }
+        }
+        return "Some? (ringbuf_read_any rb ...)".to_string();
+    }
+
+    // "1 + List.Tot.Base.length ..." → ringbuf_write_count == ...
+    if s.contains("List.Tot.Base.length") {
+        if let Some(stripped) = s.strip_prefix("1 + List.Tot.Base.length ") {
+            if stripped.starts_with('(') && find_matching_close(stripped).is_some() {
+                return "ringbuf_write_count rb".to_string();
+            }
+        }
+        return "ringbuf_write_count rb".to_string();
+    }
+
+    // "true" / "false" as-is
+    if s == "true" || s == "false" {
+        return s.to_string();
+    }
+
+    // Fallback: truncate very long terms
+    if s.len() > 80 {
+        format!("{}...", &s[..77])
+    } else {
+        s.to_string()
+    }
+}
+
+
 /// Complete diagnostic information for a verification failure.
 #[derive(Debug)]
 pub struct Diagnostic {
@@ -264,6 +451,7 @@ pub struct Diagnostic {
     pub c_source_content: Option<String>,
     pub c_source_line: Option<u32>,
     pub normalised_goal: Option<String>,
+    pub conjuncts: Vec<ConjunctInfo>,
 }
 
 fn parse_spec_error_line(stderr: &str, spec_file: Option<&str>) -> Option<usize> {
@@ -307,7 +495,6 @@ fn line_byte_range(source: &str, line: usize) -> std::ops::Range<usize> {
     start..start + line_text.len()
 }
 
-
 /// Try to resolve a C source file path: DWARF path first, then adjacent to the object file.
 pub fn resolve_c_source(
     source_loc: &str,
@@ -336,6 +523,17 @@ pub fn resolve_c_source(
     None
 }
 
+fn group_by_disjunct(conjuncts: &[ConjunctInfo]) -> Vec<Vec<&ConjunctInfo>> {
+    let mut groups: Vec<Vec<&ConjunctInfo>> = Vec::new();
+    for c in conjuncts {
+        while groups.len() <= c.disjunct {
+            groups.push(Vec::new());
+        }
+        groups[c.disjunct].push(c);
+    }
+    groups
+}
+
 impl Diagnostic {
     pub fn from_fstar_output(
         stderr: &str,
@@ -356,6 +554,7 @@ impl Diagnostic {
 
         let spec_postcondition = spec_content.and_then(extract_postcondition);
         let spec_error_line = parse_spec_error_line(stderr, spec_file);
+        let conjuncts = parse_conjuncts(stderr);
 
         Some(Diagnostic {
             stage,
@@ -368,7 +567,37 @@ impl Diagnostic {
             c_source_content: None,
             c_source_line: None,
             normalised_goal,
+            conjuncts,
         })
+    }
+
+    /// Replace `ringbuf_read_any rb <offset> <width>` with struct field
+    /// accessor names (e.g. `syscall_event_syscall_id rb`) in conjunct text.
+    pub fn with_struct_fields(mut self, structs: &[crate::elf::parser::StructDef]) -> Self {
+        let mut replacements = Vec::new();
+        for s in structs {
+            if !s.is_user_defined {
+                continue;
+            }
+            for f in &s.fields {
+                let width = match f.byte_size {
+                    1 => "W8", 2 => "W16", 4 => "W32", 8 => "W64",
+                    _ => continue,
+                };
+                replacements.push((
+                    format!("ringbuf_read_any rb {} {}", f.offset, width),
+                    format!("{}_{} rb", s.name, f.name),
+                ));
+            }
+        }
+        for c in &mut self.conjuncts {
+            for (from, to) in &replacements {
+                if c.text.contains(from.as_str()) {
+                    c.text = c.text.replace(from.as_str(), to.as_str());
+                }
+            }
+        }
+        self
     }
 
     /// Attach C source context (resolved separately by the caller).
@@ -435,6 +664,37 @@ impl Diagnostic {
             builder = builder.with_note(format!(
                 "r0 set at {} ({})", loc, origin.instruction
             ));
+        }
+
+        // Add conjunct summary as a note when available
+        let nontrivial: Vec<ConjunctInfo> = self.conjuncts.iter()
+            .filter(|c| !is_trivially_true(&c.text))
+            .cloned()
+            .collect();
+        if !nontrivial.is_empty() && self.stage == FailedStage::FunctionalCorrectness {
+            let disjunct_groups = group_by_disjunct(&nontrivial);
+            if disjunct_groups.len() == 1 {
+                let items: Vec<String> = disjunct_groups[0].iter()
+                    .map(|c| format!("  - {}", c.text))
+                    .collect();
+                builder = builder.with_note(format!(
+                    "postcondition requires all of:\n{}",
+                    items.join("\n")
+                ));
+            } else {
+                let mut note_parts = Vec::new();
+                for (i, group) in disjunct_groups.iter().enumerate() {
+                    let label = if i == 0 { "success path" } else { &format!("path {i}") };
+                    let items: Vec<String> = group.iter()
+                        .map(|c| format!("    - {}", c.text))
+                        .collect();
+                    note_parts.push(format!("  {label}:\n{}", items.join("\n")));
+                }
+                builder = builder.with_note(format!(
+                    "postcondition requires (one of):\n{}",
+                    note_parts.join("\n")
+                ));
+            }
         }
 
         let report = builder.finish();
@@ -639,6 +899,7 @@ let spec : bpf_spec =
             c_source_content: Some("int main() {\n    return 0;\n}\n".to_string()),
             c_source_line: Some(2),
             normalised_goal: None,
+            conjuncts: vec![],
         };
         let output = diag.format();
         assert!(output.contains("functional correctness check failed"));
@@ -669,6 +930,7 @@ let spec : bpf_spec =
             c_source_content: None,
             c_source_line: None,
             normalised_goal: None,
+            conjuncts: vec![],
         };
         let output = diag.format();
         assert!(output.contains("functional correctness check failed"));
@@ -735,10 +997,73 @@ let spec : bpf_spec =
     }
 
     #[test]
+    fn identify_proof_nonnull_from_dump() {
+        let stderr = concat!(
+            "proof-state: State dump @ depth 0 (TYPE_SAFETY_GOAL):\n",
+            "Location: Verify_test.fst(62,2-62,26)\n",
+            "Goal 1/1\n",
+            "\n",
+            "  |- _ : squash (true == true)\n",
+            "\n",
+            "proof-state: State dump @ depth 0 (NULL_SAFETY_GOAL):\n",
+            "Location: Verify_test.fst(68,2-68,26)\n",
+            "Goal 1/1\n",
+            "\n",
+            "  |- _ : squash (true == true)\n",
+            "\n",
+            "proof-state: State dump @ depth 0 (NORMALISED_GOAL):\n",
+            "Location: Verify_test.fst(84,2-84,55)\n",
+            "Goal 1/1\n",
+            "\n",
+            "  |- _ : squash (Scalar 1uL == Scalar 0uL)\n",
+            "\n",
+            r#"{"msg":["Assertion failed"],"level":"Error","number":19,"ctx":["While synthesizing term with a tactic","While typechecking the top-level declaration `let proof_nonnull`"]}"#,
+            "\n",
+        );
+        let stage = parse_failed_stage(stderr);
+        assert_eq!(stage, Some(FailedStage::FunctionalCorrectness));
+    }
+
+    #[test]
     fn fallback_no_dumps_no_json() {
         let stderr = "some random output\n";
         let stage = parse_failed_stage(stderr);
         assert_eq!(stage, None);
+    }
+
+    #[test]
+    fn parse_conjuncts_from_tactic_output() {
+        let stderr = concat!(
+            "TAC>> CONJUNCT|0|Eq (reg_val) (Scalar 0uL) (Scalar 0uL)\n",
+            "TAC>> CONJUNCT|0|Eq (int) (1 + List.Tot.Base.length (some stuff)) (2)\n",
+            "TAC>> CONJUNCT|0|Eq (bool) (true) (true)\n",
+            "TAC>> CONJUNCT|0|Eq (bool) (match ringbuf_read_any rb 4 W32 with | FStar.Pervasives.Native.Some _ -> true | _ -> false) (true)\n",
+            "TAC>> CONJUNCT|1|Eq (reg_val) (Scalar 0uL) (Scalar 1uL)\n",
+            "TAC>> CONJUNCT|1|Eq (int) (1 + List.Tot.Base.length (stuff)) (0)\n",
+        );
+        let conjuncts = parse_conjuncts(stderr);
+        assert_eq!(conjuncts.len(), 6);
+        assert_eq!(conjuncts[0].disjunct, 0);
+        assert_eq!(conjuncts[4].disjunct, 1);
+        // Simplification: Scalar values extracted
+        assert_eq!(conjuncts[0].text, "0uL == 0uL");
+        // ringbuf_read_any recognised
+        assert!(conjuncts[3].text.contains("Some?"));
+        // Write count recognised
+        assert!(conjuncts[1].text.contains("ringbuf_write_count"));
+    }
+
+    #[test]
+    fn simplify_conjunct_scalar_eq() {
+        assert_eq!(simplify_conjunct("Eq (reg_val) (Scalar 42uL) (Scalar 0uL)"), "42uL == 0uL");
+    }
+
+    #[test]
+    fn simplify_conjunct_ringbuf_some() {
+        let text = "Eq (bool) (match ringbuf_read_any rb 4 W32 with | FStar.Pervasives.Native.Some _ -> true | _ -> false) (true)";
+        let result = simplify_conjunct(text);
+        assert!(result.contains("Some?"), "expected Some? in: {result}");
+        assert!(result.contains("W32"), "expected W32 in: {result}");
     }
 
     #[test]

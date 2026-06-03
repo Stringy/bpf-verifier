@@ -76,6 +76,51 @@ let extract_counterexample () : Tac unit =
   | _ ->
     print ("COUNTEREXAMPLE|complex|" ^ formula_to_string post)
 
+(* Postcondition diagnosis — walks the normalised goal to emit each
+   conjunct separately. The Rust diagnostic parses these to display
+   ALL postcondition requirements, not just the one F* pointed at.
+
+   For a goal like `(r0 == 0 /\ count == 2) \/ (r0 == 1)`, emits:
+     CONJUNCT|0|r0 == 0
+     CONJUNCT|0|count == 2
+     CONJUNCT|1|r0 == 1
+   where the number is the disjunct index (0 = success path). *)
+
+(* Replace newlines with spaces so each CONJUNCT stays on one line. *)
+let flatten_string (s: string) : string =
+  String.concat " " (String.split ['\n'] s)
+
+let conjunct_to_string (f: formula) : Tac string =
+  flatten_string (formula_to_string f)
+
+let rec collect_conjuncts (f: formula) : Tac (list string) =
+  match f with
+  | And l r ->
+    let left = collect_conjuncts (term_as_formula' l) in
+    let right = collect_conjuncts (term_as_formula' r) in
+    left @ right
+  | _ -> [conjunct_to_string f]
+
+let rec emit_disjuncts (f: formula) (idx: int) : Tac int =
+  match f with
+  | Or l r ->
+    let idx' = emit_disjuncts (term_as_formula' l) idx in
+    emit_disjuncts (term_as_formula' r) idx'
+  | _ ->
+    let conjuncts = collect_conjuncts f in
+    let idx_str = string_of_int idx in
+    Tactics.Util.iter
+      (fun c -> print ("CONJUNCT|" ^ idx_str ^ "|" ^ c))
+      conjuncts;
+    idx + 1
+
+let diagnose_conjuncts () : Tac unit =
+  let goal = cur_goal () in
+  let f = term_as_formula goal in
+  let post = extract_post f in
+  let _ = emit_disjuncts post 0 in
+  ()
+
 (* Full delta normalisation — unfolds everything. Fast and complete
    for deterministic programmes. Breaks on non-determinism because
    option constructors get over-normalised. *)
@@ -83,6 +128,7 @@ let bpf_auto_pure () : Tac unit =
   norm [nbe; delta; iota; zeta; primops];
   dump "NORMALISED_GOAL";
   extract_counterexample ();
+  diagnose_conjuncts ();
   smt ()
 
 (* Selective normalisation — unfolds BPF semantics and F* integer
@@ -98,4 +144,5 @@ let bpf_auto_map () : Tac unit =
         iota; zeta; primops];
   dump "NORMALISED_GOAL";
   extract_counterexample ();
+  diagnose_conjuncts ();
   smt ()

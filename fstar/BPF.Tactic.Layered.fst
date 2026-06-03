@@ -147,6 +147,7 @@ let bpf_auto_chunked (block_sizes: list nat) : Tac unit =
   norm [nbe; delta; iota; zeta; primops];
   dump "NORMALISED_GOAL";
   extract_counterexample ();
+  diagnose_conjuncts ();
   smt ()
 
 (* Diagnostic tactic: normalise a trivially-true assertion about r0's
