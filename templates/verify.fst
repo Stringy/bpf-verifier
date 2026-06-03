@@ -79,8 +79,21 @@ let r0_origin : squash (
    all {{ path_schedules.len() }} paths and we prove each independently.
    Per-path execution is deterministic, so full normalisation works. *)
 open BPF.Exec.Path
-{%- for schedule in path_schedules %}
 
+(* All-NonNull path: the main execution path where every nullable
+   helper returns a valid pointer. This is the path that exec_program
+   always follows (exec_helper never returns Null). *)
+#push-options "--z3rlimit 120"
+let proof_nonnull : squash (program_satisfies_path program {{ spec_name }} (nonnull_sched (List.Tot.length program))) =
+{%- for i in 0..hints.len() %}
+  FStar.Classical.forall_intro (FStar.Classical.move_requires bitwise_hint_{{ i }});
+{%- endfor %}
+  _ by (norm [nbe; delta; iota; zeta; primops]; smt ())
+#pop-options
+{%- for schedule in path_schedules %}
+{%- if loop.index0 > 0 %}
+
+(* Null path {{ loop.index0 }}: at least one nullable helper returns Null. *)
 #push-options "--z3rlimit 120"
 let proof_path_{{ loop.index0 }} : squash (program_satisfies_path program {{ spec_name }} [{% for choice in schedule %}{{ choice }}{% if !loop.last %}; {% endif %}{% endfor %}]) =
 {%- for i in 0..hints.len() %}
@@ -88,15 +101,18 @@ let proof_path_{{ loop.index0 }} : squash (program_satisfies_path program {{ spe
 {%- endfor %}
   _ by (norm [nbe; delta; iota; zeta; primops]; smt ())
 #pop-options
+{%- endif %}
 {%- endfor %}
 
-(* Soundness: all paths satisfy the spec, so the programme satisfies it.
-   The path executor is equivalent to the standard executor — for any
-   initial state, exec_program follows exactly one of the enumerated
-   schedules. Each schedule is proved above.
-   TODO: formalise this as a lemma; for now we admit it. *)
+(* Soundness: exec_program is equivalent to exec_program_path with
+   an all-NonNull schedule (proved by induction in BPF.Exec.Path).
+   The proof_nonnull result therefore implies program_satisfies. *)
 let proof : squash (program_satisfies program {{ spec_name }}) =
-  admit ()
+  let _ = proof_nonnull in
+  let sched = nonnull_sched (List.Tot.length program) in
+  nonnull_sched_length (List.Tot.length program);
+  nonnull_sched_idem (List.Tot.length program);
+  path_sound program {{ spec_name }} sched
 {%- else %}
 
 (* Functional correctness *)

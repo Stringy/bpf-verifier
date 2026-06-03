@@ -124,6 +124,7 @@ let exec_helper (st0: bpf_state) (spec: helper_spec) : option bpf_state =
     let id = st.next_map_id in
     Some { st with
       regs = set_reg st.regs r0 (MapValuePtr id);
+      map_values = (id, 0uL) :: st.map_values;
       pc = st.pc + 1;
       next_map_id = id + 1;
       reg_origins = origins' }
