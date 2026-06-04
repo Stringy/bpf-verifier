@@ -39,7 +39,7 @@ You need:
 
 - **Rust** (stable, edition 2024 — requires >= 1.85)
 - **F\*** (`fstar.exe` on `$PATH`) — see [F\* installation](https://github.com/FStarLang/FStar/blob/master/INSTALL.md)
-- **Z3** (versions 4.8.5 and 4.13.3 on `$PATH`) — F\*'s `get_fstar_z3.sh` script installs both
+- **Z3** (>= 4.13.3 on `$PATH`) — F\*'s `get_fstar_z3.sh` script handles this
 - **clang** with BPF target support (for compiling BPF C programmes)
 
 Build the F\* cache and run tests:
