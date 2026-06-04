@@ -1,84 +1,167 @@
 # bpf-verifier
 
-Formally verify BPF programmes against F*/Pulse specifications. Given a compiled BPF object file and an F* spec, the verifier proves that the programme satisfies the spec — or reports a counterexample.
+Formally verify BPF programmes against F* specifications.
 
-The kernel's built-in BPF verifier checks safety (no out-of-bounds access, no null dereferences, etc.) but says nothing about what a programme *does*. This tool lets you write a formal specification of the intended behaviour and machine-check it.
+The kernel's BPF verifier checks safety — no out-of-bounds access, no null dereferences. This tool checks *correctness*: given a spec that says what a programme should do, it proves the programme does it.
 
-## How it works
+## Quick start
 
-1. Parse BPF instructions from an ELF object file
-2. Generate an F* verification module via code generation
-3. Run F* (with tactics + Z3) to typecheck the proof
-4. Report pass or fail
+### With Docker (recommended)
 
-The generated F* code models the full BPF machine state — registers, stack, map values — and symbolically executes the programme. Safety properties (stack bounds, type safety, null safety) are checked as independent layers that don't require Z3.
+No local toolchain needed. Build the image once:
 
-## Requirements
+```
+make image
+```
 
-- Rust (2024 edition)
-- [F*](https://github.com/FStarLang/FStar) (`fstar.exe` on `$PATH`)
-- `clang` with BPF target support (for compiling test programmes)
+Run the test suite:
+
+```
+docker run --rm bpf-verifier
+```
+
+Verify your own programme (mount the current directory into the container):
+
+```
+docker run --rm -v $(pwd):/workspace bpf-verifier \
+  cargo run -- verify my_prog.bpf.o --spec "tp/raw_syscalls/sys_enter:MySpec.fst"
+```
+
+Interactive shell:
+
+```
+docker run --rm -it -v $(pwd):/workspace bpf-verifier bash
+```
+
+### Without Docker
+
+You need:
+
+- **Rust** (stable, edition 2024 — requires >= 1.85)
+- **F\*** (`fstar.exe` on `$PATH`) — see [F\* installation](https://github.com/FStarLang/FStar/blob/master/INSTALL.md)
+- **Z3** (versions 4.8.5 and 4.13.3 on `$PATH`) — F\*'s `get_fstar_z3.sh` script installs both
+- **clang** with BPF target support (for compiling BPF C programmes)
+
+Build the F\* cache and run tests:
+
+```
+make test
+```
 
 ## Usage
 
 ### Verify a programme against a spec
 
 ```
-bpf-verifier verify prog.bpf.o --spec Spec.fst
+cargo run -- verify prog.bpf.o --spec "section_name:Spec.fst"
 ```
 
-### Crash-safety verification (no spec needed)
+The `--spec` argument pairs a programme section with a spec file. The section name is the ELF section containing the BPF programme (e.g. `tp/raw_syscalls/sys_enter`, `test`, `xdp`).
 
-When `--spec` is omitted, the verifier checks that the programme can't crash — no null pointer dereferences, no out-of-bounds stack access, no type confusion:
+### Crash-safety only (no spec)
 
-```
-bpf-verifier verify prog.bpf.o
-```
-
-### Inspect generated F*
-
-Dump the generated verification module without running F*:
+Without `--spec`, the verifier checks that the programme can't crash — no null dereferences, no out-of-bounds stack access, no type confusion:
 
 ```
-bpf-verifier codegen prog.bpf.o
+cargo run -- verify prog.bpf.o
 ```
 
-### Multi-programme objects
+### Multiple sections
 
-BPF object files can contain multiple programme sections. By default all sections are verified. To target a specific section:
-
-```
-bpf-verifier verify prog.bpf.o --section tracepoint/syscalls/sys_enter_open
-```
-
-Pair different specs with different sections:
+BPF objects can contain multiple programme sections. Pair different specs with different sections:
 
 ```
-bpf-verifier verify prog.bpf.o \
-  --spec "tracepoint/syscalls/sys_enter_open:OpenSpec.fst" \
-  --spec "tracepoint/syscalls/sys_exit_open:ExitSpec.fst"
+cargo run -- verify prog.bpf.o \
+  --spec "tp/raw_syscalls/sys_enter:EnterSpec.fst" \
+  --spec "tp/raw_syscalls/sys_exit:ExitSpec.fst"
+```
+
+Or verify a single section:
+
+```
+cargo run -- verify prog.bpf.o --section tp/raw_syscalls/sys_enter
+```
+
+### Inspect generated F\*
+
+Dump the verification module without running F\*:
+
+```
+cargo run -- codegen prog.bpf.o
 ```
 
 ## Writing specs
 
-Specs are F* modules that define a `spec : bpf_spec` value using combinators from `BPF.Spec`. The test corpus has plenty of examples — each programme in `tests/corpus/good/` has a matching `.bpf.c` and `.fst` file. Good starting points:
+A spec is an F\* module that defines `spec : bpf_spec` using combinators from `BPF.Spec`:
 
-- `ReturnConst` — simplest possible spec, asserts a return value
-- `StackLocal` — stack load/store with a return value assertion
-- `MapLookup` — crash-safety for a programme with a map lookup and null check
-- `BranchGt` — spec with conditional behaviour
-- `BranchResult` — disjunctive spec over non-deterministic branches (map lookup success/failure)
+```fstar
+module MySpec
 
-The `tests/corpus/bad/` directory has programmes paired with deliberately wrong specs, demonstrating what verification failure looks like.
+open FStar.UInt64
+open BPF.State
+open BPF.Spec
 
-## Running tests
-
-```
-cargo test
+let spec : bpf_spec = returns_value 0uL
 ```
 
-The test suite compiles a corpus of BPF C programmes with `clang`, verifies them against their specs, and checks that correct specs pass and incorrect specs fail.
+Available combinators:
+
+| Combinator | What it checks |
+|---|---|
+| `returns_value v` | r0 == v at exit |
+| `post_only (fun st -> ...)` | arbitrary postcondition on final state |
+| `with_pre (fun st -> ...) spec` | spec holds when precondition is true |
+| `ringbuf_written (fun rb -> ...)` | ring buffer contents |
+| `returns_and_writes v (fun rb -> ...)` | return value + ring buffer |
+| `ringbuf_writes_exactly n (fun rb -> ...)` | exactly n writes + ring buffer predicate |
+
+Ring buffer fields can be checked by offset and width:
+
+```fstar
+ringbuf_read_any rb 0 W32 == Some 42uL    (* u32 at offset 0 is 42 *)
+Some? (ringbuf_read_any rb 4 W32)          (* something was written at offset 4 *)
+```
+
+When the BPF programme defines structs for ring buffer events, DWARF-derived field accessors are generated automatically (e.g. `syscall_event_pid rb` instead of `ringbuf_read_any rb 0 W32`).
+
+### Examples
+
+The test corpus has working examples at every complexity level:
+
+| Spec | What it demonstrates |
+|---|---|
+| `ReturnConst` | Simplest — asserts a return value |
+| `StackLocal` | Stack load/store |
+| `MapLookup` | Crash-safety with a map lookup and null check |
+| `BranchResult` | Disjunctive spec (map lookup success or failure) |
+| `RingBufExact` | Ring buffer writes with exact field and count checks |
+
+See `tests/corpus/good/` for correct specs and `tests/corpus/bad/` for deliberately wrong ones.
+
+## Project structure
+
+```
+src/                    Rust — ELF parsing, analysis, codegen, diagnostics
+fstar/                  F* — BPF state model, semantics, proof infrastructure
+templates/verify.fst    Askama template for generated verification modules
+tests/corpus/           BPF C programmes + matching F* specs
+include/vmlinux/        Kernel type definitions for BPF compilation
+```
+
+For a detailed walkthrough of the verification pipeline, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Compiling BPF programmes
+
+To compile a BPF C programme for verification:
+
+```
+clang -target bpf -O2 -g -Wall -Werror \
+  -D__TARGET_ARCH_x86_64 -I include \
+  -c prog.bpf.c -o prog.bpf.o
+```
+
+The `-g` flag is required — the verifier uses DWARF debug info to generate struct field accessors and map error messages back to C source lines.
 
 ## Status
 
-This is a research project. It handles straight-line code, forward and backward branches, stack operations at all widths, BPF map lookups, and 21 BPF helper functions. See the test corpus in `tests/corpus/` for the full set of supported patterns.
+Research project. Handles straight-line code, forward and backward branches, stack operations at all widths, BPF map lookups, ring buffer writes, and 21 BPF helper functions. See the test corpus for the full set of supported patterns.
