@@ -1,0 +1,6 @@
+services:
+  verifier:
+    build: .
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
