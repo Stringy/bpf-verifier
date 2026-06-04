@@ -21,7 +21,7 @@ FSTAR_MODULES := \
 
 CHECKED_FILES := $(patsubst %,$(CACHE_DIR)/%.fst.checked,$(FSTAR_MODULES))
 
-.PHONY: test check-fstar clean-cache clean
+.PHONY: test check-fstar clean-cache clean docker
 
 test: check-fstar
 	cargo test
@@ -49,3 +49,6 @@ clean-cache:
 
 clean: clean-cache
 	cargo clean
+
+docker:
+	docker build -t bpf-verifier .
