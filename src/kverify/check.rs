@@ -674,7 +674,7 @@ fn check_call(
                 size: DEFAULT_MAP_VALUE_SIZE,
             };
             state.set(Reg::R0, RegState {
-                reg_type: RegType::PtrOrNull { inner: Box::new(inner), origin_pc: Some(pc) },
+                reg_type: RegType::PtrOrNull { inner: Box::new(inner), origin_pc: Some(pc), id },
                 tnum: Tnum::unknown(),
                 smin: i64::MIN,
                 smax: i64::MAX,
@@ -690,7 +690,7 @@ fn check_call(
                 size: DEFAULT_RINGBUF_SIZE,
             };
             state.set(Reg::R0, RegState {
-                reg_type: RegType::PtrOrNull { inner: Box::new(inner), origin_pc: Some(pc) },
+                reg_type: RegType::PtrOrNull { inner: Box::new(inner), origin_pc: Some(pc), id },
                 tnum: Tnum::unknown(),
                 smin: i64::MIN,
                 smax: i64::MAX,
@@ -1441,26 +1441,26 @@ fn refine_branch(
     };
 
     // Null check refinement: `if (ptr == 0)` or `if (ptr != 0)`.
+    // When a register is null-checked, all registers sharing the same
+    // PtrOrNull id are refined on both branches (they alias the same
+    // allocation).
     if let Some(0) = cmp_val {
         let dst_type = &fall.get(dst).reg_type;
-        if let RegType::PtrOrNull { inner, .. } = dst_type {
+        if let RegType::PtrOrNull { inner, id: ptr_id, .. } = dst_type {
             let inner = inner.as_ref().clone();
+            let ptr_id = *ptr_id;
             match op {
                 JmpOp::Jeq => {
                     // taken: ptr == 0 -> null
                     // fall: ptr != 0 -> valid pointer
-                    taken.set(dst, RegState::null());
-                    let mut valid = fall.get(dst).clone();
-                    valid.reg_type = inner;
-                    fall.set(dst, valid);
+                    refine_all_with_id(taken, ptr_id, &RegType::Null);
+                    refine_all_with_id(fall, ptr_id, &inner);
                 }
                 JmpOp::Jne => {
                     // taken: ptr != 0 -> valid pointer
                     // fall: ptr == 0 -> null
-                    fall.set(dst, RegState::null());
-                    let mut valid = taken.get(dst).clone();
-                    valid.reg_type = inner;
-                    taken.set(dst, valid);
+                    refine_all_with_id(taken, ptr_id, &inner);
+                    refine_all_with_id(fall, ptr_id, &RegType::Null);
                 }
                 _ => {}
             }
@@ -1476,6 +1476,27 @@ fn refine_branch(
                 refine_scalar_32(taken, fall, dst, op, val);
             } else {
                 refine_scalar_64(taken, fall, dst, op, val);
+            }
+        }
+    }
+}
+
+/// Refine all registers that hold a PtrOrNull with the given id.
+/// On the null branch, set them to Null. On the non-null branch,
+/// set them to the inner pointer type.
+fn refine_all_with_id(state: &mut VerifierState, ptr_id: usize, new_type: &RegType) {
+    for i in 0..11u8 {
+        let reg = Reg::from_u8(i).unwrap();
+        let reg_state = state.get(reg);
+        if let RegType::PtrOrNull { id, .. } = &reg_state.reg_type {
+            if *id == ptr_id {
+                if *new_type == RegType::Null {
+                    state.set(reg, RegState::null());
+                } else {
+                    let mut refined = state.get(reg).clone();
+                    refined.reg_type = new_type.clone();
+                    state.set(reg, refined);
+                }
             }
         }
     }

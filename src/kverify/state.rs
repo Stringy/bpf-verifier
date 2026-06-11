@@ -171,7 +171,10 @@ pub enum RegType {
     /// Pointer that might be null (before null check).
     /// `origin_pc` is the collapsed instruction index of the helper call
     /// that produced this pointer, used for diagnostic messages.
-    PtrOrNull { inner: Box<RegType>, origin_pc: Option<usize> },
+    /// `id` uniquely identifies this nullable allocation so that when one
+    /// register is null-checked, all registers sharing the same id are
+    /// refined on both branches.
+    PtrOrNull { inner: Box<RegType>, origin_pc: Option<usize>, id: usize },
     /// Known null value (after a null-check on the null branch).
     Null,
 }
