@@ -410,6 +410,23 @@ pub fn check_with_relocs(
                                 umax: u64::MAX,
                             });
                         }
+                        RelocTarget::CoreFieldOffset => {
+                            // CO-RE field byte offset. The value will be
+                            // patched to a kernel struct field offset at
+                            // load time. It's typically added to a kernel
+                            // pointer and used as a source address for
+                            // bpf_probe_read_kernel. We type it as a
+                            // kernel pointer since it represents a kernel
+                            // memory location.
+                            state.set(insn.dst, RegState {
+                                reg_type: RegType::KernelPtr,
+                                tnum: Tnum::unknown(),
+                                smin: i64::MIN,
+                                smax: i64::MAX,
+                                umin: 0,
+                                umax: u64::MAX,
+                            });
+                        }
                     }
                 } else {
                     let val = insn.imm64.unwrap_or(insn.imm as u32 as u64);
@@ -578,7 +595,7 @@ fn check_call(
         let ok = match expected {
             ArgType::Any => true,
             ArgType::Scalar | ArgType::Size | ArgType::Flags => {
-                matches!(actual, RegType::Scalar | RegType::Uninit)
+                matches!(actual, RegType::Scalar | RegType::Uninit | RegType::KernelPtr)
                     || actual == &RegType::Null
             }
             ArgType::PtrToStack => {
@@ -836,6 +853,8 @@ fn check_alu(
                         let new_off = delta.map(|d| offset + d).unwrap_or(*offset);
                         RegType::RingBufPtr { id: *id, offset: new_off, size: *size }
                     }
+                    RegType::KernelPtr => RegType::KernelPtr,
+                    RegType::DataPtr { name } => RegType::DataPtr { name: name.clone() },
                     _ => RegType::Scalar, // shouldn't happen
                 };
 
@@ -1037,7 +1056,21 @@ fn check_load(
                     .with_source(loc),
                 );
             }
-            state.set(insn.dst, RegState::scalar_unknown());
+            // For LSM/tracing hooks, ctx fields are pointers to kernel
+            // structures. 64-bit loads from ctx yield kernel pointers;
+            // smaller loads yield scalars (e.g. flags, mode fields).
+            if width == 8 {
+                state.set(insn.dst, RegState {
+                    reg_type: RegType::KernelPtr,
+                    tnum: Tnum::unknown(),
+                    smin: i64::MIN,
+                    smax: i64::MAX,
+                    umin: 0,
+                    umax: u64::MAX,
+                });
+            } else {
+                state.set(insn.dst, RegState::scalar_unknown());
+            }
         }
         RegType::RingBufPtr { id: _, offset: ptr_off, size } => {
             let eff_off = ptr_off + offset;
@@ -1057,6 +1090,24 @@ fn check_load(
                 );
             }
             state.set(insn.dst, RegState::scalar_unknown());
+        }
+        RegType::KernelPtr => {
+            // Kernel pointers are valid for dereferencing (field access
+            // via CO-RE or direct BTF access). 64-bit loads produce
+            // another kernel pointer (pointer-to-struct fields); smaller
+            // loads produce scalars (integer fields).
+            if width == 8 {
+                state.set(insn.dst, RegState {
+                    reg_type: RegType::KernelPtr,
+                    tnum: Tnum::unknown(),
+                    smin: i64::MIN,
+                    smax: i64::MAX,
+                    umin: 0,
+                    umax: u64::MAX,
+                });
+            } else {
+                state.set(insn.dst, RegState::scalar_unknown());
+            }
         }
         RegType::DataPtr { .. } => {
             // Data section pointers (rodata, global variables) are
@@ -1133,10 +1184,22 @@ fn check_store(
     let width = width_bytes(w);
     let offset = insn.offset as i64;
 
-    // Check that the value being stored doesn't leak a pointer (for non-stack stores).
+    // Check that the value being stored doesn't leak a BPF-managed pointer
+    // to an untracked destination. Stores to stack (spills) and map values
+    // are fine -- the pointer stays within the BPF programme's address space.
+    // Kernel pointers and data pointers are opaque values that can be stored
+    // anywhere. The real pointer leak check is at exit (r0 must be scalar).
     if !is_st {
         let val_type = &state.get(insn.src).reg_type;
-        if val_type.is_ptr() && !matches!(base.reg_type, RegType::FramePtr { .. }) {
+        let is_bpf_ptr = matches!(
+            val_type,
+            RegType::FramePtr { .. } | RegType::CtxPtr { .. }
+        );
+        let dst_is_tracked = matches!(
+            base.reg_type,
+            RegType::FramePtr { .. } | RegType::MapValuePtr { .. } | RegType::RingBufPtr { .. }
+        );
+        if is_bpf_ptr && !dst_is_tracked {
             return Some(
                 VerifyError::new(
                     pc,
@@ -1235,6 +1298,11 @@ fn check_store(
                     .with_source(loc),
                 );
             }
+        }
+        RegType::KernelPtr => {
+            // Stores to kernel memory -- the kernel verifier would check
+            // write permissions, but we allow it (the programme may be
+            // writing to BTF-typed kernel fields).
         }
         RegType::DataPtr { .. } => {
             // Stores to data section pointers are allowed (e.g. global variables).

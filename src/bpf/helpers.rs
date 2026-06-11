@@ -108,7 +108,7 @@ const HELPERS: &[HelperSpec] = &[
     },
     HelperSpec {
         id: 45, name: "PROBE_READ_STR", ret_type: HelperReturn::ErrorCode,
-        args: [Some(ArgType::PtrToMem), Some(ArgType::Size), Some(ArgType::Scalar), None, None],
+        args: [Some(ArgType::PtrToMem), Some(ArgType::Size), Some(ArgType::Any), None, None],
     },
     HelperSpec {
         id: 112, name: "PROBE_READ_USER", ret_type: HelperReturn::ErrorCode,

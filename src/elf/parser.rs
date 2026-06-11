@@ -30,6 +30,9 @@ pub enum RelocTarget {
     Map { name: String },
     /// References a global variable or rodata section.
     Data { name: String },
+    /// CO-RE field byte offset -- the immediate will be patched to the byte
+    /// offset of a kernel struct field. Used with bpf_probe_read_kernel.
+    CoreFieldOffset,
 }
 
 #[derive(Debug)]
@@ -73,6 +76,10 @@ pub fn parse_elf(data: &[u8]) -> Result<BpfObject, ParseError> {
     let dwarf = build_dwarf(&file);
     let structs = dwarf.as_ref().map(extract_structs).unwrap_or_default();
     let addr2line_ctx = dwarf.and_then(|d| addr2line::Context::from_dwarf(d).ok());
+
+    // Parse BTF.ext CO-RE relocations. These tell us which LD_IMM64
+    // instructions will be patched with kernel struct field offsets.
+    let core_relos = parse_btf_ext_core_relos(&file);
 
     // Collect map section names so we can distinguish map relocations from
     // data/rodata relocations. Map sections have names like "maps" or are
@@ -145,6 +152,9 @@ pub fn parse_elf(data: &[u8]) -> Result<BpfObject, ParseError> {
             }
         }
 
+        // Get CO-RE relocations for this section.
+        let section_core_relos = core_relos.get(name.as_str());
+
         let mut instructions = Vec::new();
         let mut source_locs = Vec::new();
         let mut relocations = std::collections::HashMap::new();
@@ -159,9 +169,13 @@ pub fn parse_elf(data: &[u8]) -> Result<BpfObject, ParseError> {
                     let raw2 = u64::from_le_bytes(next_chunk.try_into().expect("chunks_exact(8) guarantees 8 bytes"));
                     let high = i32::from_le_bytes(raw2.to_le_bytes()[4..8].try_into().expect("4-byte slice"));
                     insn.imm64 = Some((insn.imm as u32 as u64) | ((high as u32 as u64) << 32));
-                    // Check if this LD_IMM64 has a relocation.
+                    // Check if this LD_IMM64 has an ELF relocation.
                     if let Some(target) = reloc_offsets.remove(&byte_offset) {
                         relocations.insert(insn_idx, target);
+                    }
+                    // Check if this LD_IMM64 has a CO-RE relocation.
+                    else if section_core_relos.is_some_and(|r| r.contains(&(byte_offset as u32))) {
+                        relocations.insert(insn_idx, RelocTarget::CoreFieldOffset);
                     }
                     byte_offset += 8;
                 }
@@ -185,6 +199,111 @@ pub fn parse_elf(data: &[u8]) -> Result<BpfObject, ParseError> {
     }
 
     Ok(BpfObject { programs, structs })
+}
+
+/// Parse CO-RE relocations from the .BTF.ext section.
+///
+/// Returns a map from section name to a set of instruction byte offsets
+/// that have FIELD_BYTE_OFFSET CO-RE relocations (kind 0). These are
+/// instructions whose immediate value will be patched to a kernel struct
+/// field offset at load time.
+fn parse_btf_ext_core_relos(file: &File) -> std::collections::HashMap<String, std::collections::HashSet<u32>> {
+    let mut result = std::collections::HashMap::new();
+
+    // Find .BTF and .BTF.ext sections.
+    let btf_data = file.sections()
+        .find(|s| s.name().is_ok_and(|n| n == ".BTF"))
+        .and_then(|s| s.data().ok());
+    let btf_ext_data = file.sections()
+        .find(|s| s.name().is_ok_and(|n| n == ".BTF.ext"))
+        .and_then(|s| s.data().ok());
+
+    let (Some(btf), Some(ext)) = (btf_data, btf_ext_data) else {
+        return result;
+    };
+
+    // Parse BTF header to get the string table.
+    if btf.len() < 24 {
+        return result;
+    }
+    let btf_hdr_len = u32::from_le_bytes(btf[4..8].try_into().unwrap()) as usize;
+    let btf_str_off = u32::from_le_bytes(btf[16..20].try_into().unwrap()) as usize;
+    let btf_str_len = u32::from_le_bytes(btf[20..24].try_into().unwrap()) as usize;
+    let str_start = btf_hdr_len + btf_str_off;
+    if str_start + btf_str_len > btf.len() {
+        return result;
+    }
+    let strtab = &btf[str_start..str_start + btf_str_len];
+
+    let btf_str = |off: u32| -> &str {
+        let start = off as usize;
+        if start >= strtab.len() {
+            return "";
+        }
+        let end = strtab[start..].iter().position(|&b| b == 0)
+            .map(|p| start + p)
+            .unwrap_or(strtab.len());
+        std::str::from_utf8(&strtab[start..end]).unwrap_or("")
+    };
+
+    // Parse BTF.ext header.
+    if ext.len() < 32 {
+        return result;
+    }
+    let ext_hdr_len = u32::from_le_bytes(ext[4..8].try_into().unwrap()) as usize;
+    // core_relo_off and core_relo_len are at bytes 24-31 in the header.
+    if ext_hdr_len < 32 {
+        return result; // no CO-RE relo section in this BTF.ext version
+    }
+    let core_relo_off = u32::from_le_bytes(ext[24..28].try_into().unwrap()) as usize;
+    let core_relo_len = u32::from_le_bytes(ext[28..32].try_into().unwrap()) as usize;
+
+    if core_relo_len == 0 {
+        return result;
+    }
+
+    let relo_start = ext_hdr_len + core_relo_off;
+    if relo_start + core_relo_len > ext.len() || core_relo_len < 4 {
+        return result;
+    }
+
+    // First u32 is the record size.
+    let rec_size = u32::from_le_bytes(ext[relo_start..relo_start + 4].try_into().unwrap()) as usize;
+    if rec_size < 16 {
+        return result; // records must be at least 16 bytes
+    }
+
+    let mut pos = relo_start + 4;
+    let end = relo_start + core_relo_len;
+
+    while pos + 8 <= end {
+        let sec_name_off = u32::from_le_bytes(ext[pos..pos + 4].try_into().unwrap());
+        let num_info = u32::from_le_bytes(ext[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        pos += 8;
+
+        let sec_name = btf_str(sec_name_off).to_string();
+
+        for i in 0..num_info {
+            let rec_pos = pos + i * rec_size;
+            if rec_pos + 16 > end {
+                break;
+            }
+            let insn_off = u32::from_le_bytes(ext[rec_pos..rec_pos + 4].try_into().unwrap());
+            // type_id at rec_pos+4, access_str_off at rec_pos+8
+            let kind = u32::from_le_bytes(ext[rec_pos + 12..rec_pos + 16].try_into().unwrap());
+
+            // FIELD_BYTE_OFFSET = 0
+            if kind == 0 {
+                result.entry(sec_name.clone())
+                    .or_insert_with(std::collections::HashSet::new)
+                    .insert(insn_off);
+            }
+        }
+
+        pos += num_info * rec_size;
+    }
+
+    result
 }
 
 type GimliDwarf<'a> = gimli::Dwarf<gimli::EndianSlice<'a, gimli::LittleEndian>>;

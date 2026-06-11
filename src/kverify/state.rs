@@ -160,6 +160,10 @@ pub enum RegType {
     CtxPtr { offset: i64 },
     /// Pointer to ring buffer reservation.
     RingBufPtr { id: usize, offset: i64, size: u32 },
+    /// Pointer into kernel memory (loaded from ctx or via CO-RE field access).
+    /// Dereferencing a KernelPtr yields another KernelPtr, modelling the
+    /// chained field accesses in BPF_CORE_READ.
+    KernelPtr,
     /// Pointer to a global data section (.rodata, .data, .bss, or a global
     /// variable). These are patched in by the loader at load time from
     /// LD_IMM64 relocations.
@@ -181,6 +185,7 @@ impl RegType {
                 | RegType::MapValuePtr { .. }
                 | RegType::CtxPtr { .. }
                 | RegType::RingBufPtr { .. }
+                | RegType::KernelPtr
                 | RegType::DataPtr { .. }
         )
     }
@@ -198,6 +203,7 @@ impl RegType {
             RegType::MapValuePtr { .. } => "map_value_ptr",
             RegType::CtxPtr { .. } => "ctx_ptr",
             RegType::RingBufPtr { .. } => "ringbuf_ptr",
+            RegType::KernelPtr => "kernel_ptr",
             RegType::DataPtr { .. } => "data_ptr",
             RegType::PtrOrNull { .. } => "ptr_or_null",
             RegType::Null => "null",
@@ -218,6 +224,7 @@ impl fmt::Display for RegType {
             RegType::RingBufPtr { id, offset, size } => {
                 write!(f, "ringbuf(id={id}, off={offset}, size={size})")
             }
+            RegType::KernelPtr => write!(f, "kernel_ptr"),
             RegType::DataPtr { name } => write!(f, "data_ptr({name})"),
             RegType::PtrOrNull { inner, .. } => write!(f, "{inner}_or_null"),
             RegType::Null => write!(f, "null"),
