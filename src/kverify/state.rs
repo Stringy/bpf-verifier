@@ -75,16 +75,22 @@ impl Tnum {
         }
     }
 
-    /// Left shift by a known amount.
+    /// Left shift by a known amount. Shifts >= 64 produce zero.
     pub fn lsh(self, shift: u32) -> Tnum {
+        if shift >= 64 {
+            return Tnum::constant(0);
+        }
         Tnum {
             value: self.value << shift,
             mask: self.mask << shift,
         }
     }
 
-    /// Logical right shift by a known amount.
+    /// Logical right shift by a known amount. Shifts >= 64 produce zero.
     pub fn rsh(self, shift: u32) -> Tnum {
+        if shift >= 64 {
+            return Tnum::constant(0);
+        }
         Tnum {
             value: self.value >> shift,
             mask: self.mask >> shift,
@@ -193,11 +199,6 @@ impl RegType {
         )
     }
 
-    /// Whether this type could be null.
-    pub fn is_maybe_null(&self) -> bool {
-        matches!(self, RegType::PtrOrNull { .. } | RegType::Null)
-    }
-
     pub fn type_name(&self) -> &'static str {
         match self {
             RegType::Uninit => "uninit",
@@ -236,7 +237,7 @@ impl fmt::Display for RegType {
 }
 
 /// Full state of a single register: type + scalar bounds.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegState {
     pub reg_type: RegType,
     /// Tracked number for scalar range analysis.
@@ -297,6 +298,17 @@ impl RegState {
     pub fn ctx_ptr(offset: i64) -> Self {
         Self {
             reg_type: RegType::CtxPtr { offset },
+            tnum: Tnum::unknown(),
+            smin: i64::MIN,
+            smax: i64::MAX,
+            umin: 0,
+            umax: u64::MAX,
+        }
+    }
+
+    pub fn kernel_ptr() -> Self {
+        Self {
+            reg_type: RegType::KernelPtr,
             tnum: Tnum::unknown(),
             smin: i64::MIN,
             smax: i64::MAX,
@@ -407,67 +419,39 @@ impl RegState {
                 result.refine_bounds();
                 result
             }
-            // For pointer types with equal type, widen the offset if it differs.
-            RegType::FramePtr { offset: a } => {
-                let b = match &other.reg_type {
-                    RegType::FramePtr { offset } => *offset,
-                    _ => unreachable!(),
-                };
-                if a == &b {
-                    self.clone()
-                } else {
-                    // Different offsets -> demote to scalar (conservative).
-                    RegState::scalar_unknown()
-                }
-            }
-            RegType::CtxPtr { offset: a } => {
-                let b = match &other.reg_type {
-                    RegType::CtxPtr { offset } => *offset,
-                    _ => unreachable!(),
-                };
-                if a == &b {
+            // Same pointer type: keep if offsets match, else demote.
+            // We've already checked self.reg_type == other.reg_type above.
+            _ => {
+                if self.reg_type == other.reg_type {
                     self.clone()
                 } else {
                     RegState::scalar_unknown()
                 }
             }
-            // For identical types, keep self.
-            _ => self.clone(),
         }
     }
 
     /// Whether `self` is a substate of `other` (i.e. `other` is at least
-    /// as general as `self`). Used for fixed-point detection.
+    /// as general as `self`). Used for fixed-point detection at loop heads.
     pub fn is_substate_of(&self, other: &RegState) -> bool {
-        // Uninit is only a substate of uninit.
         if self.reg_type == RegType::Uninit {
             return other.reg_type == RegType::Uninit;
         }
-        // If other is uninit but self is not, not a substate.
         if other.reg_type == RegType::Uninit {
             return false;
         }
-        // Types must match (or other must be scalar, which subsumes everything non-ptr).
         if self.reg_type != other.reg_type {
-            if other.reg_type == RegType::Scalar && self.reg_type == RegType::Scalar {
-                // fall through to bounds check
-            } else {
-                return false;
-            }
+            return false;
         }
-
         if self.reg_type == RegType::Scalar {
-            // Self's range must be contained within other's range.
             self.umin >= other.umin
                 && self.umax <= other.umax
                 && self.smin >= other.smin
                 && self.smax <= other.smax
-                // Self's tnum must be at least as precise.
                 && (self.tnum.mask & !other.tnum.mask) == 0
                 && (self.tnum.value & !other.tnum.mask) == (other.tnum.value & !other.tnum.mask)
         } else {
-            // Non-scalar: structural equality.
-            self.reg_type == other.reg_type
+            true // same non-scalar type -> substate
         }
     }
 }
@@ -535,19 +519,25 @@ pub struct StackState {
     spills: std::collections::HashMap<i64, RegState>,
 }
 
-impl StackState {
-    pub fn new() -> Self {
+impl Default for StackState {
+    fn default() -> Self {
         Self {
             init: [false; 512],
             spills: std::collections::HashMap::new(),
         }
+    }
+}
+
+impl StackState {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Convert a frame-pointer-relative offset to a stack array index.
     /// r10 + offset where offset is negative: stack_idx = 512 + offset.
     fn to_index(offset: i64) -> Option<usize> {
         let idx = 512 + offset;
-        if idx >= 0 && idx < 512 {
+        if (0..512).contains(&idx) {
             Some(idx as usize)
         } else {
             None
@@ -597,8 +587,8 @@ impl StackState {
     /// initialised in both states. Spills are kept only if identical.
     pub fn widen(&self, other: &StackState) -> StackState {
         let mut init = [false; 512];
-        for i in 0..512 {
-            init[i] = self.init[i] && other.init[i];
+        for (i, slot) in init.iter_mut().enumerate() {
+            *slot = self.init[i] && other.init[i];
         }
         let mut spills = std::collections::HashMap::new();
         for (offset, reg) in &self.spills {

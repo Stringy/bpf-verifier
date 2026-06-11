@@ -112,7 +112,6 @@ pub fn parse_elf(data: &[u8]) -> Result<BpfObject, ParseError> {
             return Err(ParseError::UnalignedSection(name));
         }
 
-        let _section_idx = section.index();
         let section_addr = section.address();
 
         // Parse relocations for this section.
@@ -138,7 +137,7 @@ pub fn parse_elf(data: &[u8]) -> Result<BpfObject, ParseError> {
                         continue;
                     }
                     // Look up the symbol name.
-                    if let Some(sym) = file.symbol_by_index(object::SymbolIndex(sym_idx as usize)).ok() {
+                    if let Ok(sym) = file.symbol_by_index(object::SymbolIndex(sym_idx as usize)) {
                         let sym_name = sym.name().unwrap_or("").to_string();
                         let sym_section = sym.section_index();
                         let target = if sym_section.is_some_and(|si| map_section_indices.contains(&si)) {
@@ -282,6 +281,7 @@ fn parse_btf_ext_core_relos(file: &File) -> std::collections::HashMap<String, st
         pos += 8;
 
         let sec_name = btf_str(sec_name_off).to_string();
+        let set = result.entry(sec_name).or_default();
 
         for i in 0..num_info {
             let rec_pos = pos + i * rec_size;
@@ -289,14 +289,11 @@ fn parse_btf_ext_core_relos(file: &File) -> std::collections::HashMap<String, st
                 break;
             }
             let insn_off = u32::from_le_bytes(ext[rec_pos..rec_pos + 4].try_into().unwrap());
-            // type_id at rec_pos+4, access_str_off at rec_pos+8
             let kind = u32::from_le_bytes(ext[rec_pos + 12..rec_pos + 16].try_into().unwrap());
 
             // FIELD_BYTE_OFFSET = 0
             if kind == 0 {
-                result.entry(sec_name.clone())
-                    .or_insert_with(std::collections::HashSet::new)
-                    .insert(insn_off);
+                set.insert(insn_off);
             }
         }
 

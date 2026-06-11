@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use crate::bpf::helpers::{get_helper, HelperReturn};
 use crate::bpf::instruction::{AluOp, BpfInsn, JmpOp, MemWidth, Opcode, Reg, Source};
 use crate::elf::parser::{RelocTarget, SourceLoc};
@@ -82,7 +84,7 @@ fn handle_back_edge(
     target_pc: usize,
     incoming_state: &VerifierState,
     incoming_stack: &StackState,
-    loop_heads: &mut std::collections::HashMap<usize, (VerifierState, StackState, u32)>,
+    loop_heads: &mut HashMap<usize, (VerifierState, StackState, u32)>,
 ) -> BackEdgeResult {
     if let Some((head_state, head_stack, iterations)) = loop_heads.get_mut(&target_pc) {
         *iterations += 1;
@@ -114,9 +116,9 @@ fn handle_back_edge(
 /// instruction index (where LdImm64 is 1 entry). Returns a vec where entry `i`
 /// is the raw PC of collapsed instruction `i`, and a reverse map from raw PC to
 /// collapsed index.
-fn build_pc_map(instructions: &[BpfInsn]) -> (Vec<usize>, std::collections::HashMap<usize, usize>) {
+fn build_pc_map(instructions: &[BpfInsn]) -> (Vec<usize>, HashMap<usize, usize>) {
     let mut collapsed_to_raw = Vec::with_capacity(instructions.len());
-    let mut raw_to_collapsed = std::collections::HashMap::new();
+    let mut raw_to_collapsed = HashMap::new();
     let mut raw_pc: usize = 0;
     for (idx, insn) in instructions.iter().enumerate() {
         collapsed_to_raw.push(raw_pc);
@@ -132,7 +134,7 @@ fn resolve_branch_target(
     pc: usize,
     offset: i16,
     collapsed_to_raw: &[usize],
-    raw_to_collapsed: &std::collections::HashMap<usize, usize>,
+    raw_to_collapsed: &HashMap<usize, usize>,
 ) -> Option<usize> {
     let raw_pc = collapsed_to_raw[pc];
     let raw_target = raw_pc as i64 + 1 + offset as i64;
@@ -151,14 +153,14 @@ pub fn check(
     instructions: &[BpfInsn],
     source_locs: &[Option<SourceLoc>],
 ) -> CheckResult {
-    check_with_relocs(instructions, source_locs, &std::collections::HashMap::new())
+    check_with_relocs(instructions, source_locs, &HashMap::new())
 }
 
 /// Run the verifier with relocation info for LD_IMM64 instructions.
 pub fn check_with_relocs(
     instructions: &[BpfInsn],
     source_locs: &[Option<SourceLoc>],
-    relocations: &std::collections::HashMap<usize, RelocTarget>,
+    relocations: &HashMap<usize, RelocTarget>,
 ) -> CheckResult {
     let mut errors = Vec::new();
     let mut total_visited: usize = 0;
@@ -193,8 +195,8 @@ pub fn check_with_relocs(
 
     // Loop head states: for each PC that is the target of a back-edge,
     // track the widened state and how many times we've iterated.
-    let mut loop_heads: std::collections::HashMap<usize, (VerifierState, StackState, u32)> =
-        std::collections::HashMap::new();
+    let mut loop_heads: HashMap<usize, (VerifierState, StackState, u32)> =
+        HashMap::new();
 
     while let Some(item) = work.pop() {
         let pc = item.pc;
@@ -418,14 +420,7 @@ pub fn check_with_relocs(
                             // bpf_probe_read_kernel. We type it as a
                             // kernel pointer since it represents a kernel
                             // memory location.
-                            state.set(insn.dst, RegState {
-                                reg_type: RegType::KernelPtr,
-                                tnum: Tnum::unknown(),
-                                smin: i64::MIN,
-                                smax: i64::MAX,
-                                umin: 0,
-                                umax: u64::MAX,
-                            });
+                            state.set(insn.dst, RegState::kernel_ptr());
                         }
                     }
                 } else {
@@ -485,7 +480,7 @@ pub fn check_with_relocs(
     // Deduplicate errors by (pc, error kind). We use a seen-set rather than
     // sort+dedup because errors should preserve discovery order.
     {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         errors.retain(|e| {
             seen.insert((e.pc, std::mem::discriminant(&e.kind)))
         });
@@ -592,10 +587,18 @@ fn check_call(
         let reg = arg_regs[i];
         let actual = &state.get(reg).reg_type;
 
+        // Uninit registers are never valid helper arguments.
+        if *actual == RegType::Uninit {
+            return Some(
+                VerifyError::new(pc, ErrorKind::UninitRegRead { reg })
+                    .with_source(loc),
+            );
+        }
+
         let ok = match expected {
             ArgType::Any => true,
             ArgType::Scalar | ArgType::Size | ArgType::Flags => {
-                matches!(actual, RegType::Scalar | RegType::Uninit | RegType::KernelPtr)
+                matches!(actual, RegType::Scalar | RegType::KernelPtr)
                     || actual == &RegType::Null
             }
             ArgType::PtrToStack => {
@@ -635,7 +638,7 @@ fn check_call(
             }
         };
 
-        if !ok && *actual != RegType::Uninit {
+        if !ok {
             return Some(
                 VerifyError::new(
                     pc,
@@ -657,14 +660,7 @@ fn check_call(
             state.set(Reg::R0, RegState::scalar_unknown());
         }
         HelperReturn::KernelPtr => {
-            state.set(Reg::R0, RegState {
-                reg_type: RegType::KernelPtr,
-                tnum: Tnum::unknown(),
-                smin: i64::MIN,
-                smax: i64::MAX,
-                umin: 0,
-                umax: u64::MAX,
-            });
+            state.set(Reg::R0, RegState::kernel_ptr());
         }
         HelperReturn::MapPtr => {
             let id = id_gen.next();
@@ -720,14 +716,7 @@ fn check_call(
                 RegType::KernelPtr
             );
             if write_size == 8 && src_is_kernel {
-                stack.spill(dst_off, &RegState {
-                    reg_type: RegType::KernelPtr,
-                    tnum: Tnum::unknown(),
-                    smin: i64::MIN,
-                    smax: i64::MAX,
-                    umin: 0,
-                    umax: u64::MAX,
-                });
+                stack.spill(dst_off, &RegState::kernel_ptr());
             }
         }
     }
@@ -886,26 +875,29 @@ fn check_alu(
                     _ => None,
                 };
 
+                // When the scalar addend is unknown, we can't track the
+                // offset -- demote to scalar (conservative but sound).
+                let Some(delta) = delta else {
+                    state.set(dst_reg, RegState::scalar_unknown());
+                    return None;
+                };
+
                 let new_type = match &dst_state.reg_type {
                     RegType::FramePtr { offset } => {
-                        let new_off = delta.map(|d| offset + d).unwrap_or(*offset);
-                        RegType::FramePtr { offset: new_off }
+                        RegType::FramePtr { offset: offset + delta }
                     }
                     RegType::CtxPtr { offset } => {
-                        let new_off = delta.map(|d| offset + d).unwrap_or(*offset);
-                        RegType::CtxPtr { offset: new_off }
+                        RegType::CtxPtr { offset: offset + delta }
                     }
                     RegType::MapValuePtr { id, offset, size } => {
-                        let new_off = delta.map(|d| offset + d).unwrap_or(*offset);
-                        RegType::MapValuePtr { id: *id, offset: new_off, size: *size }
+                        RegType::MapValuePtr { id: *id, offset: offset + delta, size: *size }
                     }
                     RegType::RingBufPtr { id, offset, size } => {
-                        let new_off = delta.map(|d| offset + d).unwrap_or(*offset);
-                        RegType::RingBufPtr { id: *id, offset: new_off, size: *size }
+                        RegType::RingBufPtr { id: *id, offset: offset + delta, size: *size }
                     }
                     RegType::KernelPtr => RegType::KernelPtr,
                     RegType::DataPtr { name } => RegType::DataPtr { name: name.clone() },
-                    _ => RegType::Scalar, // shouldn't happen
+                    _ => RegType::Scalar,
                 };
 
                 state.set(dst_reg, RegState {
@@ -1110,14 +1102,7 @@ fn check_load(
             // structures. 64-bit loads from ctx yield kernel pointers;
             // smaller loads yield scalars (e.g. flags, mode fields).
             if width == 8 {
-                state.set(insn.dst, RegState {
-                    reg_type: RegType::KernelPtr,
-                    tnum: Tnum::unknown(),
-                    smin: i64::MIN,
-                    smax: i64::MAX,
-                    umin: 0,
-                    umax: u64::MAX,
-                });
+                state.set(insn.dst, RegState::kernel_ptr());
             } else {
                 state.set(insn.dst, RegState::scalar_unknown());
             }
@@ -1147,14 +1132,7 @@ fn check_load(
             // another kernel pointer (pointer-to-struct fields); smaller
             // loads produce scalars (integer fields).
             if width == 8 {
-                state.set(insn.dst, RegState {
-                    reg_type: RegType::KernelPtr,
-                    tnum: Tnum::unknown(),
-                    smin: i64::MIN,
-                    smax: i64::MAX,
-                    umin: 0,
-                    umax: u64::MAX,
-                });
+                state.set(insn.dst, RegState::kernel_ptr());
             } else {
                 state.set(insn.dst, RegState::scalar_unknown());
             }
@@ -1689,48 +1667,66 @@ fn refine_scalar_32(
             fall.set(dst, fs);
         }
         JmpOp::Jsgt => {
+            // Only refine 64-bit signed bounds when the value is in the
+            // 32-bit domain, matching the unsigned case.
             let sval = val32 as i32 as i64;
-            let mut ts = taken.get(dst).clone();
-            ts.smin = ts.smin.max(sval.saturating_add(1));
-            ts.refine_bounds();
-            taken.set(dst, ts);
-            let mut fs = fall.get(dst).clone();
-            fs.smax = fs.smax.min(sval);
-            fs.refine_bounds();
-            fall.set(dst, fs);
+            if taken.get(dst).umax <= 0xFFFF_FFFF {
+                let mut ts = taken.get(dst).clone();
+                ts.smin = ts.smin.max(sval.saturating_add(1));
+                ts.refine_bounds();
+                taken.set(dst, ts);
+            }
+            if fall.get(dst).umax <= 0xFFFF_FFFF {
+                let mut fs = fall.get(dst).clone();
+                fs.smax = fs.smax.min(sval);
+                fs.refine_bounds();
+                fall.set(dst, fs);
+            }
         }
         JmpOp::Jsge => {
             let sval = val32 as i32 as i64;
-            let mut ts = taken.get(dst).clone();
-            ts.smin = ts.smin.max(sval);
-            ts.refine_bounds();
-            taken.set(dst, ts);
-            let mut fs = fall.get(dst).clone();
-            fs.smax = fs.smax.min(sval.saturating_sub(1));
-            fs.refine_bounds();
-            fall.set(dst, fs);
+            if taken.get(dst).umax <= 0xFFFF_FFFF {
+                let mut ts = taken.get(dst).clone();
+                ts.smin = ts.smin.max(sval);
+                ts.refine_bounds();
+                taken.set(dst, ts);
+            }
+            if fall.get(dst).umax <= 0xFFFF_FFFF {
+                let mut fs = fall.get(dst).clone();
+                fs.smax = fs.smax.min(sval.saturating_sub(1));
+                fs.refine_bounds();
+                fall.set(dst, fs);
+            }
         }
         JmpOp::Jslt => {
             let sval = val32 as i32 as i64;
-            let mut ts = taken.get(dst).clone();
-            ts.smax = ts.smax.min(sval.saturating_sub(1));
-            ts.refine_bounds();
-            taken.set(dst, ts);
-            let mut fs = fall.get(dst).clone();
-            fs.smin = fs.smin.max(sval);
-            fs.refine_bounds();
-            fall.set(dst, fs);
+            if taken.get(dst).umax <= 0xFFFF_FFFF {
+                let mut ts = taken.get(dst).clone();
+                ts.smax = ts.smax.min(sval.saturating_sub(1));
+                ts.refine_bounds();
+                taken.set(dst, ts);
+            }
+            if fall.get(dst).umax <= 0xFFFF_FFFF {
+                let mut fs = fall.get(dst).clone();
+                fs.smin = fs.smin.max(sval);
+                fs.refine_bounds();
+                fall.set(dst, fs);
+            }
         }
         JmpOp::Jsle => {
             let sval = val32 as i32 as i64;
-            let mut ts = taken.get(dst).clone();
-            ts.smax = ts.smax.min(sval);
-            ts.refine_bounds();
-            taken.set(dst, ts);
-            let mut fs = fall.get(dst).clone();
-            fs.smin = fs.smin.max(sval.saturating_add(1));
-            fs.refine_bounds();
-            fall.set(dst, fs);
+            if taken.get(dst).umax <= 0xFFFF_FFFF {
+                let mut ts = taken.get(dst).clone();
+                ts.smax = ts.smax.min(sval);
+                ts.refine_bounds();
+                taken.set(dst, ts);
+            }
+            if fall.get(dst).umax <= 0xFFFF_FFFF {
+                let mut fs = fall.get(dst).clone();
+                fs.smin = fs.smin.max(sval.saturating_add(1));
+                fs.refine_bounds();
+                fall.set(dst, fs);
+            }
         }
         JmpOp::Jset | JmpOp::Ja => {}
     }

@@ -243,7 +243,14 @@ fn format_error_with_source(
     use ariadne::{Color, Label, Report, ReportKind};
 
     let line_start = byte_offset_of_line(source, loc.line as usize);
-    let line_text = source[line_start..].lines().next().unwrap_or("");
+    let Some(rest) = source.get(line_start..) else {
+        // Line beyond end of source -- fall back to plain text.
+        return format!(
+            "error[E{:04}]: {}\n  --> insn #{}\n  = source: {}:{}\n\n",
+            error_code(&err.kind), err.kind, err.pc, loc.file, loc.line
+        );
+    };
+    let line_text = rest.lines().next().unwrap_or("");
     let line_end = line_start + line_text.len();
 
     let file_id: String = loc.path.clone();
@@ -353,10 +360,21 @@ fn error_code(kind: &ErrorKind) -> u16 {
 }
 
 /// Compute byte offset of the start of a 1-based line number.
+/// Returns `source.len()` if the line is beyond the end of the source.
 fn byte_offset_of_line(source: &str, line: usize) -> usize {
-    source
-        .lines()
-        .take(line.saturating_sub(1))
-        .map(|l| l.len() + 1)
-        .sum()
+    if line <= 1 {
+        return 0;
+    }
+    // Count newlines directly to handle both \n and \r\n correctly.
+    let target = line - 1; // number of newlines to skip
+    let mut count = 0;
+    for (i, byte) in source.as_bytes().iter().enumerate() {
+        if *byte == b'\n' {
+            count += 1;
+            if count == target {
+                return i + 1;
+            }
+        }
+    }
+    source.len()
 }
