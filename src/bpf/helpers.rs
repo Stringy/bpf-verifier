@@ -150,7 +150,7 @@ const HELPERS: &[HelperSpec] = &[
     },
     HelperSpec {
         id: 181, name: "LOOP", ret_type: HelperReturn::Scalar,
-        args: [Some(ArgType::Scalar), Some(ArgType::Scalar), Some(ArgType::Any), Some(ArgType::Flags), None],
+        args: [Some(ArgType::Scalar), Some(ArgType::Any), Some(ArgType::Any), Some(ArgType::Flags), None],
     },
 ];
 
