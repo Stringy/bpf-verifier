@@ -1,5 +1,5 @@
 use object::read::ObjectSection;
-use object::{File, Object, SectionKind};
+use object::{File, Object, ObjectSymbol, SectionKind};
 use addr2line::gimli;
 
 use crate::bpf::instruction::{BpfInsn, Opcode};
@@ -23,11 +23,22 @@ pub struct SourceLoc {
     pub line: u32,
 }
 
+/// The target of an LD_IMM64 relocation.
+#[derive(Debug, Clone)]
+pub enum RelocTarget {
+    /// References a BPF map (map fd will be patched at load time).
+    Map { name: String },
+    /// References a global variable or rodata section.
+    Data { name: String },
+}
+
 #[derive(Debug)]
 pub struct BpfProgram {
     pub section_name: String,
     pub instructions: Vec<BpfInsn>,
     pub source_locs: Vec<Option<SourceLoc>>,
+    /// Relocations for LD_IMM64 instructions, keyed by collapsed instruction index.
+    pub relocations: std::collections::HashMap<usize, RelocTarget>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +74,19 @@ pub fn parse_elf(data: &[u8]) -> Result<BpfObject, ParseError> {
     let structs = dwarf.as_ref().map(extract_structs).unwrap_or_default();
     let addr2line_ctx = dwarf.and_then(|d| addr2line::Context::from_dwarf(d).ok());
 
+    // Collect map section names so we can distinguish map relocations from
+    // data/rodata relocations. Map sections have names like "maps" or are
+    // in a ".maps" section, but the most reliable signal is the symbol
+    // section index pointing to a maps section. We'll use a simpler heuristic:
+    // known BPF map names from the symbol table.
+    let map_section_indices: std::collections::HashSet<object::SectionIndex> = file
+        .sections()
+        .filter(|s| {
+            s.name().is_ok_and(|n| n == ".maps" || n == "maps")
+        })
+        .map(|s| s.index())
+        .collect();
+
     let mut programs = Vec::new();
 
     for section in file.sections() {
@@ -81,10 +105,51 @@ pub fn parse_elf(data: &[u8]) -> Result<BpfObject, ParseError> {
             return Err(ParseError::UnalignedSection(name));
         }
 
+        let _section_idx = section.index();
         let section_addr = section.address();
+
+        // Parse relocations for this section.
+        // BPF relocation sections are named ".rel<section_name>" (REL, not RELA).
+        let mut reloc_offsets = std::collections::HashMap::<u64, RelocTarget>::new();
+        for rel_section in file.sections() {
+            let rel_name = rel_section.name().unwrap_or("");
+            // Match ".rel" + section name (e.g. ".rellsm/file_open" for "lsm/file_open")
+            // or ".rel." + section name.
+            let expected = format!(".rel{}", name);
+            if rel_name != expected && rel_name != format!(".rel.{}", name) {
+                continue;
+            }
+            if let Ok(rel_data) = rel_section.data() {
+                // Parse REL entries (16 bytes each: 8-byte offset + 8-byte info).
+                for entry in rel_data.chunks_exact(16) {
+                    let offset = u64::from_le_bytes(entry[0..8].try_into().unwrap());
+                    let info = u64::from_le_bytes(entry[8..16].try_into().unwrap());
+                    let sym_idx = (info >> 32) as u32;
+                    let rel_type = info as u32;
+                    // R_BPF_64_64 = 1
+                    if rel_type != 1 {
+                        continue;
+                    }
+                    // Look up the symbol name.
+                    if let Some(sym) = file.symbol_by_index(object::SymbolIndex(sym_idx as usize)).ok() {
+                        let sym_name = sym.name().unwrap_or("").to_string();
+                        let sym_section = sym.section_index();
+                        let target = if sym_section.is_some_and(|si| map_section_indices.contains(&si)) {
+                            RelocTarget::Map { name: sym_name }
+                        } else {
+                            RelocTarget::Data { name: sym_name }
+                        };
+                        reloc_offsets.insert(offset, target);
+                    }
+                }
+            }
+        }
+
         let mut instructions = Vec::new();
         let mut source_locs = Vec::new();
+        let mut relocations = std::collections::HashMap::new();
         let mut byte_offset: u64 = 0;
+        let mut insn_idx: usize = 0;
         let mut chunks = section_data.chunks_exact(8);
         while let Some(chunk) = chunks.next() {
             let raw = u64::from_le_bytes(chunk.try_into().expect("chunks_exact(8) guarantees 8 bytes"));
@@ -94,10 +159,15 @@ pub fn parse_elf(data: &[u8]) -> Result<BpfObject, ParseError> {
                     let raw2 = u64::from_le_bytes(next_chunk.try_into().expect("chunks_exact(8) guarantees 8 bytes"));
                     let high = i32::from_le_bytes(raw2.to_le_bytes()[4..8].try_into().expect("4-byte slice"));
                     insn.imm64 = Some((insn.imm as u32 as u64) | ((high as u32 as u64) << 32));
+                    // Check if this LD_IMM64 has a relocation.
+                    if let Some(target) = reloc_offsets.remove(&byte_offset) {
+                        relocations.insert(insn_idx, target);
+                    }
                     byte_offset += 8;
                 }
                 instructions.push(insn);
                 source_locs.push(lookup_source_loc(&addr2line_ctx, insn_addr));
+                insn_idx += 1;
             }
             byte_offset += 8;
         }
@@ -106,6 +176,7 @@ pub fn parse_elf(data: &[u8]) -> Result<BpfObject, ParseError> {
             section_name: name,
             instructions,
             source_locs,
+            relocations,
         });
     }
 

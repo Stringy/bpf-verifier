@@ -6,6 +6,7 @@ use clap::Parser;
 use bpf_verifier::analysis::{dataflow, stack_bounds};
 use bpf_verifier::codegen::fstar::{generate_fstar, generate_fields_module};
 use bpf_verifier::elf::parser::{parse_elf, BpfProgram, StructDef};
+use bpf_verifier::kverify;
 use bpf_verifier::verify::diagnostic::{Diagnostic, resolve_c_source};
 use bpf_verifier::verify::runner::{FstarRunner, VerifyResult};
 
@@ -44,6 +45,17 @@ enum Commands {
 
         #[arg(long, help = "Path to F* spec file")]
         spec: Option<PathBuf>,
+    },
+    /// Check a BPF programme for safety (kernel-verifier-style, no root required)
+    Check {
+        #[arg(help = "Path to BPF object file")]
+        program: PathBuf,
+
+        #[arg(long, help = "Only check these sections, repeatable")]
+        section: Vec<String>,
+
+        #[arg(long, help = "Show detailed verification state")]
+        verbose: bool,
     },
 }
 
@@ -148,6 +160,13 @@ fn main() {
             spec,
         } => {
             std::process::exit(run_codegen(&program, section.as_deref(), spec.as_deref()));
+        }
+        Commands::Check {
+            program,
+            section,
+            verbose,
+        } => {
+            std::process::exit(run_check(&program, &section, verbose));
         }
     }
 }
@@ -391,4 +410,111 @@ fn verify_program(
         }
         Err(e) => Err(format!("{e}")),
     }
+}
+
+fn run_check(
+    program_path: &Path,
+    sections: &[String],
+    verbose: bool,
+) -> i32 {
+    let elf_data = match std::fs::read(program_path) {
+        Ok(data) => data,
+        Err(e) => {
+            eprintln!("error: failed to read {}: {e}", program_path.display());
+            return 2;
+        }
+    };
+
+    let bpf_object = match parse_elf(&elf_data) {
+        Ok(obj) => obj,
+        Err(e) => {
+            eprintln!("error: failed to parse ELF: {e}");
+            return 2;
+        }
+    };
+
+    if bpf_object.programs.is_empty() {
+        eprintln!("error: no programme sections in {}", program_path.display());
+        return 2;
+    }
+
+    let programs: Vec<&BpfProgram> = if sections.is_empty() {
+        bpf_object.programs.iter().collect()
+    } else {
+        let mut selected = Vec::new();
+        for name in sections {
+            match find_program(&bpf_object.programs, Some(name)) {
+                Ok(p) => selected.push(p),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return 2;
+                }
+            }
+        }
+        selected
+    };
+
+    // Resolve C source files for diagnostic output.
+    let mut c_sources: HashMap<String, String> = HashMap::new();
+    for prog in &programs {
+        for loc in prog.source_locs.iter().flatten() {
+            if !c_sources.contains_key(&loc.path) {
+                if let Ok(content) = std::fs::read_to_string(&loc.path) {
+                    c_sources.insert(loc.path.clone(), content);
+                } else if let Some(dir) = program_path.parent() {
+                    let adjacent = dir.join(&loc.file);
+                    if let Ok(content) = std::fs::read_to_string(&adjacent) {
+                        c_sources.insert(loc.path.clone(), content);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut passed = 0;
+    let mut failed = 0;
+
+    for prog in &programs {
+        let result = kverify::check::check_with_relocs(
+            &prog.instructions,
+            &prog.source_locs,
+            &prog.relocations,
+        );
+
+        if verbose {
+            eprintln!(
+                "  {} instructions visited for {}",
+                result.instructions_visited, prog.section_name
+            );
+        }
+
+        if result.passed() {
+            println!("  OK: {} (safety check passed)", prog.section_name);
+            passed += 1;
+        } else {
+            println!(
+                "  FAIL: {} ({} error{})",
+                prog.section_name,
+                result.errors.len(),
+                if result.errors.len() == 1 { "" } else { "s" }
+            );
+            let diagnostic = kverify::format_errors(
+                &result.errors,
+                &prog.source_locs,
+                &c_sources,
+            );
+            eprint!("{diagnostic}");
+            failed += 1;
+        }
+    }
+
+    if programs.len() > 1 {
+        eprintln!(
+            "\n{} of {} programmes passed safety check",
+            passed,
+            passed + failed
+        );
+    }
+
+    if failed > 0 { 1 } else { 0 }
 }
