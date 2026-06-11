@@ -680,10 +680,14 @@ fn check_call(
         }
         HelperReturn::RingBufPtr => {
             let id = id_gen.next();
+            // Use the actual reservation size from arg2 if known.
+            let reserve_size = state.get(Reg::R2).tnum.known_value()
+                .map(|v| v as u32)
+                .unwrap_or(DEFAULT_RINGBUF_SIZE);
             let inner = RegType::RingBufPtr {
                 id,
                 offset: 0,
-                size: DEFAULT_RINGBUF_SIZE,
+                size: reserve_size,
             };
             state.set(Reg::R0, RegState {
                 reg_type: RegType::PtrOrNull { inner: Box::new(inner), origin_pc: Some(pc), id },
