@@ -4,6 +4,8 @@ pub enum HelperReturn {
     MapPtr,
     RingBufPtr,
     ErrorCode,
+    /// Returns a kernel pointer (e.g. bpf_get_current_task_btf).
+    KernelPtr,
 }
 
 /// Expected type for a helper argument register.
@@ -103,7 +105,7 @@ const HELPERS: &[HelperSpec] = &[
         args: [Some(ArgType::PtrToMem), Some(ArgType::Size), None, None, None],
     },
     HelperSpec {
-        id: 35, name: "GET_CURRENT_TASK", ret_type: HelperReturn::Scalar,
+        id: 35, name: "GET_CURRENT_TASK", ret_type: HelperReturn::KernelPtr,
         args: [None, None, None, None, None],
     },
     HelperSpec {
@@ -143,7 +145,7 @@ const HELPERS: &[HelperSpec] = &[
         args: [Some(ArgType::Scalar), Some(ArgType::PtrToMem), Some(ArgType::Size), None, None],
     },
     HelperSpec {
-        id: 158, name: "GET_CURRENT_TASK_BTF", ret_type: HelperReturn::Scalar,
+        id: 158, name: "GET_CURRENT_TASK_BTF", ret_type: HelperReturn::KernelPtr,
         args: [None, None, None, None, None],
     },
     HelperSpec {

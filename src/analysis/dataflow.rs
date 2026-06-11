@@ -432,7 +432,7 @@ fn handle_call(state: &mut PathState, insn: &BpfInsn) {
                 PathChoice::AsNull => state.set(0, AbsValue::Null),
             }
         }
-        Some(HelperReturn::Scalar | HelperReturn::ErrorCode) => {
+        Some(HelperReturn::Scalar | HelperReturn::ErrorCode | HelperReturn::KernelPtr) => {
             state.set(0, AbsValue::Symbolic);
         }
         None => {

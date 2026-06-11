@@ -566,7 +566,7 @@ fn check_exit(
 
 fn check_call(
     state: &mut VerifierState,
-    _stack: &mut StackState,
+    stack: &mut StackState,
     insn: &BpfInsn,
     pc: usize,
     loc: Option<&SourceLoc>,
@@ -609,7 +609,9 @@ fn check_call(
             ArgType::PtrToMapKey | ArgType::PtrToMapValue => {
                 matches!(
                     actual,
-                    RegType::FramePtr { .. } | RegType::MapValuePtr { .. }
+                    RegType::FramePtr { .. }
+                        | RegType::MapValuePtr { .. }
+                        | RegType::DataPtr { .. }
                 )
             }
             ArgType::PtrToRingBuf => {
@@ -654,6 +656,16 @@ fn check_call(
         HelperReturn::Scalar | HelperReturn::ErrorCode => {
             state.set(Reg::R0, RegState::scalar_unknown());
         }
+        HelperReturn::KernelPtr => {
+            state.set(Reg::R0, RegState {
+                reg_type: RegType::KernelPtr,
+                tnum: Tnum::unknown(),
+                smin: i64::MIN,
+                smax: i64::MAX,
+                umin: 0,
+                umax: u64::MAX,
+            });
+        }
         HelperReturn::MapPtr => {
             let id = id_gen.next();
             let inner = RegType::MapValuePtr {
@@ -685,6 +697,38 @@ fn check_call(
                 umin: 0,
                 umax: u64::MAX,
             });
+        }
+    }
+
+    // Track helper memory writes. Helpers like bpf_probe_read_kernel write
+    // to the pointer in arg1, with the size from arg2. Mark those stack
+    // bytes as initialised so subsequent loads don't trigger false positives.
+    if let Some(ArgType::PtrToMem | ArgType::PtrToStack) = helper.args[0] {
+        if let RegType::FramePtr { offset: dst_off } = &state.get(Reg::R1).reg_type {
+            let dst_off = *dst_off;
+            // Determine write size from arg2 (Size) if it's a known constant.
+            let write_size = state.get(Reg::R2).tnum.known_value()
+                .unwrap_or(0)
+                .min(512) as u8;
+            if write_size > 0 {
+                stack.mark_written(dst_off, write_size);
+            }
+            // If reading 8 bytes from a kernel pointer, the result is
+            // also a kernel pointer (chained struct field access).
+            let src_is_kernel = matches!(
+                state.get(Reg::R3).reg_type,
+                RegType::KernelPtr
+            );
+            if write_size == 8 && src_is_kernel {
+                stack.spill(dst_off, &RegState {
+                    reg_type: RegType::KernelPtr,
+                    tnum: Tnum::unknown(),
+                    smin: i64::MIN,
+                    smax: i64::MAX,
+                    umin: 0,
+                    umax: u64::MAX,
+                });
+            }
         }
     }
 
@@ -816,8 +860,14 @@ fn check_alu(
     if dst_state.reg_type.is_ptr() {
         match op {
             AluOp::Add | AluOp::Sub => {
-                // ptr +/- scalar is OK, adjust offset.
                 if src_type.is_ptr() {
+                    if op == AluOp::Sub {
+                        // ptr - ptr produces a scalar (offset difference).
+                        // The kernel allows this for same-type pointers.
+                        state.set(dst_reg, RegState::scalar_unknown());
+                        return None;
+                    }
+                    // ptr + ptr is never valid.
                     return Some(
                         VerifyError::new(
                             pc,
