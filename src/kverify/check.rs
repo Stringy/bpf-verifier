@@ -11,13 +11,6 @@ use super::state::{RegState, RegType, StackState, Tnum, VerifierState};
 /// before declaring the programme too complex.
 const COMPLEXITY_LIMIT: usize = 1_000_000;
 
-/// Maximum number of times a loop head can be widened before we declare
-/// the loop unbounded. This effectively limits loop trip counts: a simple
-/// `for (i = 0; i < N; i++)` loop needs at most N+1 widening iterations
-/// to reach a fixed point (one per concrete value of i, plus one for the
-/// widened state that subsumes all).
-const MAX_LOOP_ITERATIONS: u32 = 64;
-
 /// Maximum BPF stack size in bytes.
 const STACK_SIZE: i64 = 512;
 
@@ -59,56 +52,12 @@ impl IdGen {
     fn next(&mut self) -> usize { let id = self.0; self.0 += 1; id }
 }
 
-/// Result of processing a back-edge (loop iteration).
-enum BackEdgeResult {
-    /// The loop hasn't converged yet -- continue with the widened state.
-    Continue(VerifierState, StackState),
-    /// The loop has reached a fixed point -- the current state at the loop
-    /// head already subsumes this iteration. No more work needed.
-    FixedPoint,
-    /// The loop has exceeded the iteration limit -- it's unbounded.
-    Exceeded,
-}
-
-/// Handle a back-edge to `target_pc` with the given incoming state.
-///
-/// This implements widening-based loop analysis:
-/// 1. First visit: store the incoming state as the loop head state.
-/// 2. Subsequent visits: widen the stored state with the incoming state.
-/// 3. If the widened state is identical to the previous state (fixed point),
-///    the loop is fully verified.
-/// 4. If we exceed MAX_LOOP_ITERATIONS, declare the loop unbounded.
-fn handle_back_edge(
-    target_pc: usize,
-    incoming_state: &VerifierState,
-    incoming_stack: &StackState,
-    loop_heads: &mut HashMap<usize, (VerifierState, StackState, u32)>,
-) -> BackEdgeResult {
-    if let Some((head_state, head_stack, iterations)) = loop_heads.get_mut(&target_pc) {
-        *iterations += 1;
-        if *iterations > MAX_LOOP_ITERATIONS {
-            return BackEdgeResult::Exceeded;
-        }
-
-        // Check if the incoming state is already subsumed by the loop head state.
-        if incoming_state.is_substate_of(head_state) {
-            return BackEdgeResult::FixedPoint;
-        }
-
-        // Widen the loop head state to include the incoming state.
-        let widened_state = head_state.widen(incoming_state);
-        let widened_stack = head_stack.widen(incoming_stack);
-        *head_state = widened_state.clone();
-        *head_stack = widened_stack.clone();
-        BackEdgeResult::Continue(widened_state, widened_stack)
-    } else {
-        // First time seeing this back-edge target -- store the incoming state.
-        let state = incoming_state.clone();
-        let stack = incoming_stack.clone();
-        loop_heads.insert(target_pc, (state.clone(), stack.clone(), 1));
-        BackEdgeResult::Continue(state, stack)
-    }
-}
+/// Back-edges (backward jumps) are handled by deferring them to the
+/// backtrack stack, just like forward branches. The state pruning at
+/// the target PC prevents infinite exploration: if the incoming state
+/// is subsumed by an already-explored state at that PC, the path is
+/// pruned. For actual loops, successive iterations gradually widen
+/// the explored states until a fixed point is reached.
 
 /// Build a mapping from raw BPF PC (counting LdImm64 as 2 slots) to collapsed
 /// instruction index (where LdImm64 is 1 entry). Returns a vec where entry `i`
@@ -184,9 +133,10 @@ pub fn check_with_relocs(
         vec![Vec::new(); instructions.len()];
     const MAX_STATES_PER_PC: usize = 16;
 
-    // Loop head states for bounded loop analysis.
-    let mut loop_heads: HashMap<usize, (VerifierState, StackState, u32)> =
-        HashMap::new();
+    // Track back-edge targets. When a backward jump targets a PC, we
+    // widen the explored state there instead of storing a new one.
+    // This ensures loops converge to a fixed point.
+    let mut back_edge_targets: HashSet<usize> = HashSet::new();
 
     // Current state: walk instructions sequentially starting at pc=0.
     let mut pc: usize = 0;
@@ -231,7 +181,19 @@ pub fn check_with_relocs(
             }
             break;
         }
-        if explored[pc].len() < MAX_STATES_PER_PC {
+
+        if back_edge_targets.contains(&pc) {
+            // At a loop head: widen the first stored state to subsume
+            // this iteration, ensuring convergence.
+            if let Some((prev_regs, prev_stack)) = explored[pc].first_mut() {
+                state = prev_regs.widen(&state);
+                stack = prev_stack.widen(&stack);
+                *prev_regs = state.clone();
+                *prev_stack = stack.clone();
+            } else {
+                explored[pc].push((state.clone(), stack.clone()));
+            }
+        } else if explored[pc].len() < MAX_STATES_PER_PC {
             explored[pc].push((state.clone(), stack.clone()));
         }
 
@@ -267,27 +229,11 @@ pub fn check_with_relocs(
             Opcode::JmpJa => {
                 let target = resolve_branch_target(pc, insn.offset, &collapsed_to_raw, &raw_to_collapsed);
                 match target {
-                    Some(t) if t <= pc => {
-                        match handle_back_edge(t, &state, &stack, &mut loop_heads) {
-                            BackEdgeResult::Continue(ws, wst) => {
-                                state = ws;
-                                stack = wst;
-                                pc = t;
-                            }
-                            BackEdgeResult::FixedPoint => {
-                                pc = usize::MAX; // loop converged
-                            }
-                            BackEdgeResult::Exceeded => {
-                                errors.push(
-                                    VerifyError::new(pc, ErrorKind::UnboundedLoop { target_pc: t })
-                                        .with_source(loc)
-                                );
-                                pc = usize::MAX;
-                            }
-                        }
-                    }
                     Some(t) => {
-                        pc = t; // unconditional forward jump
+                        if t <= pc {
+                            back_edge_targets.insert(t);
+                        }
+                        pc = t;
                     }
                     None => {
                         errors.push(
@@ -336,30 +282,15 @@ pub fn check_with_relocs(
                     insn, op, src, is_32,
                 );
 
-                // Handle the taken branch: defer it (or handle back-edge).
+                // Defer the taken branch for later exploration.
                 if target <= pc {
-                    match handle_back_edge(target, &taken_state, &taken_stack, &mut loop_heads) {
-                        BackEdgeResult::Continue(ws, wst) => {
-                            backtrack.push(WorkItem {
-                                pc: target, state: ws, stack: wst,
-                            });
-                        }
-                        BackEdgeResult::FixedPoint => {}
-                        BackEdgeResult::Exceeded => {
-                            errors.push(
-                                VerifyError::new(pc, ErrorKind::UnboundedLoop { target_pc: target })
-                                    .with_source(loc)
-                            );
-                        }
-                    }
-                } else {
-                    // Defer the taken branch for later exploration.
-                    backtrack.push(WorkItem {
-                        pc: target,
-                        state: taken_state,
-                        stack: taken_stack,
-                    });
+                    back_edge_targets.insert(target);
                 }
+                backtrack.push(WorkItem {
+                    pc: target,
+                    state: taken_state,
+                    stack: taken_stack,
+                });
 
                 // Continue with fallthrough.
                 pc += 1;
