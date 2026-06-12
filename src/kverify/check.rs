@@ -337,7 +337,7 @@ pub fn check_with_relocs(
                 if let Some(reloc) = relocations.get(&pc) {
                     match reloc {
                         RelocTarget::Map { .. } => {
-                            state.set(insn.dst, RegState::scalar_unknown());
+                            state.set_at(insn.dst, RegState::scalar_unknown(), pc);
                         }
                         RelocTarget::Data { name } => {
                             state.set(insn.dst, RegState {
@@ -351,12 +351,12 @@ pub fn check_with_relocs(
                             });
                         }
                         RelocTarget::CoreFieldOffset => {
-                            state.set(insn.dst, RegState::kernel_ptr());
+                            state.set_at(insn.dst, RegState::kernel_ptr(), pc);
                         }
                     }
                 } else {
                     let val = insn.imm64.unwrap_or(insn.imm as u32 as u64);
-                    state.set(insn.dst, RegState::scalar_value(val));
+                    state.set_at(insn.dst, RegState::scalar_value(val), pc);
                 }
                 pc += 1;
             }
@@ -724,7 +724,7 @@ fn check_alu(
                 } else {
                     insn.imm as u32 as u64
                 };
-                state.set(dst_reg, RegState::scalar_value(val));
+                state.set_at(dst_reg, RegState::scalar_value(val), pc);
             } else {
                 let mut new_state = state.get(insn.src).clone();
                 if !is_64 {
@@ -735,7 +735,7 @@ fn check_alu(
                     new_state.smin = new_state.smin.max(0);
                     new_state.smax = new_state.smax.min(0xFFFF_FFFF);
                 }
-                state.set(dst_reg, new_state);
+                state.set_at(dst_reg, new_state, pc);
             }
             return None;
         }
@@ -753,7 +753,7 @@ fn check_alu(
                     .with_source(loc),
                 );
             }
-            state.set(dst_reg, RegState::scalar_unknown());
+            state.set_at(dst_reg, RegState::scalar_unknown(), pc);
             return None;
         }
         _ => {}
@@ -814,7 +814,7 @@ fn check_alu(
                     if op == AluOp::Sub {
                         // ptr - ptr produces a scalar (offset difference).
                         // The kernel allows this for same-type pointers.
-                        state.set(dst_reg, RegState::scalar_unknown());
+                        state.set_at(dst_reg, RegState::scalar_unknown(), pc);
                         return None;
                     }
                     // ptr + ptr is never valid.
@@ -853,10 +853,10 @@ fn check_alu(
                         }
                         other => other.clone(),
                     };
-                    state.set(dst_reg, RegState {
+                    state.set_at(dst_reg, RegState {
                         reg_type: new_type,
                         ..RegState::scalar_unknown()
-                    });
+                    }, pc);
                     return None;
                 };
 
@@ -878,10 +878,10 @@ fn check_alu(
                     _ => RegType::Scalar,
                 };
 
-                state.set(dst_reg, RegState {
+                state.set_at(dst_reg, RegState {
                     reg_type: new_type,
                     ..RegState::scalar_unknown()
-                });
+                }, pc);
                 return None;
             }
             _ => {
@@ -926,10 +926,10 @@ fn check_alu(
             }
             _ => RegType::Scalar,
         };
-        state.set(dst_reg, RegState {
+        state.set_at(dst_reg, RegState {
             reg_type: new_type,
             ..RegState::scalar_unknown()
-        });
+        }, pc);
         return None;
     }
 
@@ -1020,7 +1020,7 @@ fn check_alu(
     };
     result.refine_bounds();
 
-    state.set(dst_reg, result);
+    state.set_at(dst_reg, result, pc);
     None
 }
 
@@ -1071,11 +1071,11 @@ fn check_load(
             // Check for spilled register reload.
             if width == 8 {
                 if let Some(spilled) = stack.get_spill(eff_off) {
-                    state.set(insn.dst, spilled.clone());
+                    state.set_at(insn.dst, spilled.clone(), pc);
                     return None;
                 }
             }
-            state.set(insn.dst, RegState::scalar_unknown());
+            state.set_at(insn.dst, RegState::scalar_unknown(), pc);
         }
         RegType::MapValuePtr { offset: ptr_off, size, .. } => {
             let eff_off = ptr_off + offset;
@@ -1095,7 +1095,7 @@ fn check_load(
                     .with_origin(origin.as_ref()),
                 );
             }
-            state.set(insn.dst, RegState::scalar_unknown());
+            state.set_at(insn.dst, RegState::scalar_unknown(), pc);
         }
         RegType::CtxPtr { offset: ptr_off } => {
             let eff_off = ptr_off + offset;
@@ -1118,9 +1118,9 @@ fn check_load(
             // structures. 64-bit loads from ctx yield kernel pointers;
             // smaller loads yield scalars (e.g. flags, mode fields).
             if width == 8 {
-                state.set(insn.dst, RegState::kernel_ptr());
+                state.set_at(insn.dst, RegState::kernel_ptr(), pc);
             } else {
-                state.set(insn.dst, RegState::scalar_unknown());
+                state.set_at(insn.dst, RegState::scalar_unknown(), pc);
             }
         }
         RegType::RingBufPtr { offset: ptr_off, size, .. } => {
@@ -1141,7 +1141,7 @@ fn check_load(
                     .with_origin(origin.as_ref()),
                 );
             }
-            state.set(insn.dst, RegState::scalar_unknown());
+            state.set_at(insn.dst, RegState::scalar_unknown(), pc);
         }
         RegType::KernelPtr => {
             // Kernel pointers are valid for dereferencing (field access
@@ -1149,9 +1149,9 @@ fn check_load(
             // another kernel pointer (pointer-to-struct fields); smaller
             // loads produce scalars (integer fields).
             if width == 8 {
-                state.set(insn.dst, RegState::kernel_ptr());
+                state.set_at(insn.dst, RegState::kernel_ptr(), pc);
             } else {
-                state.set(insn.dst, RegState::scalar_unknown());
+                state.set_at(insn.dst, RegState::scalar_unknown(), pc);
             }
         }
         RegType::DataPtr { .. } => {
@@ -1159,7 +1159,7 @@ fn check_load(
             // patched by the loader and always valid. We can't bounds-check
             // because we don't know the data section layout, but the
             // kernel verifier accepts these.
-            state.set(insn.dst, RegState::scalar_unknown());
+            state.set_at(insn.dst, RegState::scalar_unknown(), pc);
         }
         RegType::PtrOrNull { origin_pc: opc, .. } => {
             let origin_loc = opc
@@ -2305,5 +2305,35 @@ mod tests {
         ];
         let result = check(&insns, &empty_locs(4));
         assert!(result.passed(), "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn error_includes_register_provenance() {
+        // mov64 r0, 42       // insn 0: r0 = scalar(42)
+        // ldx w64 r1, [r0+0] // insn 1: deref r0 (scalar, not a pointer)
+        // exit
+        let insns = vec![
+            BpfInsn {
+                opcode: Opcode::Alu64(AluOp::Mov, Source::Imm),
+                dst: Reg::R0, src: Reg::R0, offset: 0, imm: 42, imm64: None,
+            },
+            BpfInsn {
+                opcode: Opcode::Ldx(MemWidth::DW),
+                dst: Reg::R1, src: Reg::R0, offset: 0, imm: 0, imm64: None,
+            },
+            BpfInsn::decode(0x0000_0000_0000_0095).unwrap(),
+        ];
+        let result = check(&insns, &empty_locs(3));
+        assert!(!result.passed());
+        let err = &result.errors[0];
+        assert!(
+            matches!(err.kind, ErrorKind::InvalidPointerDeref { .. }),
+            "expected InvalidPointerDeref, got: {:?}", err.kind
+        );
+        // The provenance should point to insn 0 (where r0 was set to scalar)
+        assert_eq!(
+            err.reg_written_at, Some(0),
+            "expected register provenance at insn 0, got: {:?}", err.reg_written_at
+        );
     }
 }
