@@ -184,14 +184,15 @@ pub fn check_with_relocs(
         depth: 0,
     }];
 
-    // Track visited (pc, state_hash) pairs for pruning. For now, we use a
-    // simple set of PCs with a depth limit per PC to prevent infinite loops
-    // without full state equivalence checking.
-    let mut visit_count: Vec<u32> = vec![0; instructions.len()];
-    // Allow each PC to be visited a limited number of times across different
-    // states before we consider it explored. This is a coarse approximation
-    // of the kernel's state pruning.
-    const MAX_VISITS_PER_PC: u32 = 64;
+    // State pruning: at each PC, store previously-explored states. When a
+    // new state arrives, prune if any stored state subsumes it (i.e., the
+    // new state is a substate of an already-explored one). This eliminates
+    // redundant path exploration and prevents infeasible paths from
+    // generating false positives.
+    let mut explored: Vec<Vec<(VerifierState, StackState)>> =
+        vec![Vec::new(); instructions.len()];
+    // Hard cap per PC as a safety net against pathological cases.
+    const MAX_STATES_PER_PC: usize = 16;
 
     // Loop head states: for each PC that is the target of a back-edge,
     // track the widened state and how many times we've iterated.
@@ -224,9 +225,18 @@ pub fn check_with_relocs(
             break;
         }
 
-        visit_count[pc] += 1;
-        if visit_count[pc] > MAX_VISITS_PER_PC {
-            continue; // prune: this PC has been explored enough
+        // State pruning: skip if an already-explored state at this PC
+        // subsumes the incoming state.
+        let dominated = explored[pc].iter().any(|(prev_regs, prev_stack)| {
+            state.is_substate_of(prev_regs) && stack.is_substate_of(prev_stack)
+        });
+        if dominated {
+            continue;
+        }
+        // Store this state for future pruning. Cap the list to avoid
+        // unbounded memory growth.
+        if explored[pc].len() < MAX_STATES_PER_PC {
+            explored[pc].push((state.clone(), stack.clone()));
         }
 
         let insn = &instructions[pc];

@@ -585,6 +585,18 @@ impl StackState {
         self.spills.remove(&offset);
     }
 
+    /// Whether `self` is a substate of `other` for stack initialisation.
+    /// True when every byte initialised in `other` is also initialised in `self`
+    /// (i.e., `self` has at least as much written as `other`).
+    pub fn is_substate_of(&self, other: &StackState) -> bool {
+        for i in 0..512 {
+            if other.init[i] && !self.init[i] {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Widen two stack states: a byte is initialised only if it's
     /// initialised in both states. Spills are kept only if identical.
     pub fn widen(&self, other: &StackState) -> StackState {
