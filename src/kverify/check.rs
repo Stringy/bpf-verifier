@@ -834,9 +834,26 @@ fn check_alu(
                 };
 
                 // When the scalar addend is unknown, we can't track the
-                // offset -- demote to scalar (conservative but sound).
+                // exact offset. Keep the pointer type (it's still a valid
+                // pointer) but reset the offset to 0 since we can't
+                // bounds-check precisely. KernelPtr/DataPtr don't track
+                // offsets so they're unaffected.
                 let Some(delta) = delta else {
-                    state.set(dst_reg, RegState::scalar_unknown());
+                    let new_type = match &dst_state.reg_type {
+                        RegType::FramePtr { .. } => RegType::FramePtr { offset: 0 },
+                        RegType::CtxPtr { .. } => RegType::CtxPtr { offset: 0 },
+                        RegType::MapValuePtr { id, size, origin_pc, .. } => {
+                            RegType::MapValuePtr { id: *id, offset: 0, size: *size, origin_pc: *origin_pc }
+                        }
+                        RegType::RingBufPtr { id, size, origin_pc, .. } => {
+                            RegType::RingBufPtr { id: *id, offset: 0, size: *size, origin_pc: *origin_pc }
+                        }
+                        other => other.clone(),
+                    };
+                    state.set(dst_reg, RegState {
+                        reg_type: new_type,
+                        ..RegState::scalar_unknown()
+                    });
                     return None;
                 };
 
@@ -895,7 +912,15 @@ fn check_alu(
             }
             (RegType::KernelPtr, _) => RegType::KernelPtr,
             (RegType::DataPtr { name }, _) => RegType::DataPtr { name: name.clone() },
-            // Unknown offset with sized pointer: demote.
+            // Unknown offset: keep the pointer type, reset offset.
+            (RegType::FramePtr { .. }, None) => RegType::FramePtr { offset: 0 },
+            (RegType::CtxPtr { .. }, None) => RegType::CtxPtr { offset: 0 },
+            (RegType::MapValuePtr { id, size, origin_pc, .. }, None) => {
+                RegType::MapValuePtr { id: *id, offset: 0, size: *size, origin_pc: *origin_pc }
+            }
+            (RegType::RingBufPtr { id, size, origin_pc, .. }, None) => {
+                RegType::RingBufPtr { id: *id, offset: 0, size: *size, origin_pc: *origin_pc }
+            }
             _ => RegType::Scalar,
         };
         state.set(dst_reg, RegState {
