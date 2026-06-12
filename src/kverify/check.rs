@@ -33,14 +33,12 @@ const DEFAULT_RINGBUF_SIZE: u32 = 65536;
 /// the programme type. In practice the kernel checks this per-type.
 const CTX_SIZE: i64 = 4096;
 
-/// A work item for the verifier's exploration queue.
+/// A deferred branch target on the backtrack stack.
 #[derive(Clone)]
 struct WorkItem {
     pc: usize,
     state: VerifierState,
     stack: StackState,
-    /// Number of instructions processed on this path (for complexity limit).
-    depth: usize,
 }
 
 /// Result of verifying a BPF programme.
@@ -146,9 +144,10 @@ fn resolve_branch_target(
 
 /// Run the kernel-style verifier on a BPF programme.
 ///
-/// Walks all reachable paths through the programme using depth-first
-/// exploration, tracking register types, scalar ranges, stack initialisation,
-/// and pointer validity at each instruction.
+/// Walks instructions sequentially, processing the fallthrough path first
+/// and deferring taken branches to a backtrack stack. At path endpoints
+/// (EXIT, errors, pruned states), pops the next deferred branch and
+/// continues from there.
 pub fn check(
     instructions: &[BpfInsn],
     source_locs: &[Option<SourceLoc>],
@@ -173,44 +172,37 @@ pub fn check_with_relocs(
 
     let (collapsed_to_raw, raw_to_collapsed) = build_pc_map(instructions);
 
-    // Track whether we reached at least one EXIT instruction.
     let mut reached_exit = false;
 
-    // DFS exploration of all paths.
-    let mut work = vec![WorkItem {
-        pc: 0,
-        state: VerifierState::entry(),
-        stack: StackState::new(),
-        depth: 0,
-    }];
+    // Backtrack stack: deferred branch targets to explore after the
+    // current path ends. The verifier processes the fallthrough path
+    // first (like the kernel), deferring the taken branch for later.
+    let mut backtrack: Vec<WorkItem> = Vec::new();
 
-    // State pruning: at each PC, store previously-explored states. When a
-    // new state arrives, prune if any stored state subsumes it (i.e., the
-    // new state is a substate of an already-explored one). This eliminates
-    // redundant path exploration and prevents infeasible paths from
-    // generating false positives.
+    // State pruning: at each PC, store previously-explored states.
     let mut explored: Vec<Vec<(VerifierState, StackState)>> =
         vec![Vec::new(); instructions.len()];
-    // Hard cap per PC as a safety net against pathological cases.
     const MAX_STATES_PER_PC: usize = 16;
 
-    // Loop head states: for each PC that is the target of a back-edge,
-    // track the widened state and how many times we've iterated.
+    // Loop head states for bounded loop analysis.
     let mut loop_heads: HashMap<usize, (VerifierState, StackState, u32)> =
         HashMap::new();
 
-    while let Some(item) = work.pop() {
-        let pc = item.pc;
-        let mut state = item.state;
-        let mut stack = item.stack;
-        let depth = item.depth;
+    // Current state: walk instructions sequentially starting at pc=0.
+    let mut pc: usize = 0;
+    let mut state = VerifierState::entry();
+    let mut stack = StackState::new();
 
+    loop {
+        // End of path: try to pop a deferred branch from the backtrack stack.
         if pc >= instructions.len() {
-            errors.push(
-                VerifyError::new(pc.saturating_sub(1), ErrorKind::FallThrough)
-                    .with_source(source_locs.last().and_then(|l| l.as_ref()))
-            );
-            continue;
+            if let Some(item) = backtrack.pop() {
+                pc = item.pc;
+                state = item.state;
+                stack = item.stack;
+                continue;
+            }
+            break;
         }
 
         total_visited += 1;
@@ -225,16 +217,20 @@ pub fn check_with_relocs(
             break;
         }
 
-        // State pruning: skip if an already-explored state at this PC
-        // subsumes the incoming state.
+        // State pruning: if an already-explored state at this PC subsumes
+        // the current state, this path adds nothing new. Backtrack.
         let dominated = explored[pc].iter().any(|(prev_regs, prev_stack)| {
             state.is_substate_of(prev_regs) && stack.is_substate_of(prev_stack)
         });
         if dominated {
-            continue;
+            if let Some(item) = backtrack.pop() {
+                pc = item.pc;
+                state = item.state;
+                stack = item.stack;
+                continue;
+            }
+            break;
         }
-        // Store this state for future pruning. Cap the list to avoid
-        // unbounded memory growth.
         if explored[pc].len() < MAX_STATES_PER_PC {
             explored[pc].push((state.clone(), stack.clone()));
         }
@@ -242,64 +238,63 @@ pub fn check_with_relocs(
         let insn = &instructions[pc];
         let loc = source_locs.get(pc).and_then(|l| l.as_ref());
 
+        // Process the instruction. For most instructions, advance pc by 1.
+        // For branches, defer one path and continue with the other.
+        // For EXIT/errors, backtrack to the next deferred branch.
         match insn.opcode {
             Opcode::Unknown(raw) => {
                 errors.push(
                     VerifyError::new(pc, ErrorKind::UnknownOpcode { raw })
                         .with_source(loc)
                 );
-                continue;
+                pc = usize::MAX; // trigger backtrack
             }
             Opcode::Exit => {
                 reached_exit = true;
                 if let Some(err) = check_exit(&state, pc, loc) {
                     errors.push(err);
                 }
-                continue; // path ends
+                pc = usize::MAX; // trigger backtrack
             }
             Opcode::Call => {
                 if let Some(err) = check_call(&mut state, &mut stack, insn, pc, loc, &mut id_gen, source_locs) {
                     errors.push(err);
-                    continue;
+                    pc = usize::MAX;
+                } else {
+                    pc += 1;
                 }
-                work.push(WorkItem { pc: pc + 1, state, stack, depth: depth + 1 });
             }
             Opcode::JmpJa => {
                 let target = resolve_branch_target(pc, insn.offset, &collapsed_to_raw, &raw_to_collapsed);
                 match target {
                     Some(t) if t <= pc => {
-                        // Back-edge: handle as bounded loop.
                         match handle_back_edge(t, &state, &stack, &mut loop_heads) {
-                            BackEdgeResult::Continue(widened_state, widened_stack) => {
-                                work.push(WorkItem {
-                                    pc: t,
-                                    state: widened_state,
-                                    stack: widened_stack,
-                                    depth: depth + 1,
-                                });
+                            BackEdgeResult::Continue(ws, wst) => {
+                                state = ws;
+                                stack = wst;
+                                pc = t;
                             }
                             BackEdgeResult::FixedPoint => {
-                                // State at loop head already subsumes this
-                                // iteration -- the loop is verified.
+                                pc = usize::MAX; // loop converged
                             }
                             BackEdgeResult::Exceeded => {
                                 errors.push(
                                     VerifyError::new(pc, ErrorKind::UnboundedLoop { target_pc: t })
                                         .with_source(loc)
                                 );
-                                continue;
+                                pc = usize::MAX;
                             }
                         }
                     }
                     Some(t) => {
-                        work.push(WorkItem { pc: t, state, stack, depth: depth + 1 });
+                        pc = t; // unconditional forward jump
                     }
                     None => {
                         errors.push(
                             VerifyError::new(pc, ErrorKind::FallThrough)
                                 .with_source(loc)
                         );
-                        continue;
+                        pc = usize::MAX;
                     }
                 }
             }
@@ -307,14 +302,15 @@ pub fn check_with_relocs(
                 let is_32 = matches!(insn.opcode, Opcode::Jmp32(..));
                 let target = resolve_branch_target(pc, insn.offset, &collapsed_to_raw, &raw_to_collapsed);
 
-                // Check source register readability
                 if let Some(err) = check_reg_readable(&state, insn.dst, pc, loc) {
                     errors.push(err);
+                    pc = usize::MAX;
                     continue;
                 }
                 if src == Source::Reg {
                     if let Some(err) = check_reg_readable(&state, insn.src, pc, loc) {
                         errors.push(err);
+                        pc = usize::MAX;
                         continue;
                     }
                 }
@@ -326,36 +322,29 @@ pub fn check_with_relocs(
                             VerifyError::new(pc, ErrorKind::FallThrough)
                                 .with_source(loc)
                         );
+                        pc = usize::MAX;
                         continue;
                     }
                 };
 
-                // Create two states: one for the taken branch, one for fallthrough.
+                // Refine both branch states.
                 let mut taken_state = state.clone();
                 let taken_stack = stack.clone();
-                let mut fall_state = state;
-                let fall_stack = stack;
-
-                // Refine types on each branch (null checks, scalar bounds).
+                // state/stack become the fallthrough state after refinement.
                 refine_branch(
-                    &mut taken_state, &mut fall_state,
+                    &mut taken_state, &mut state,
                     insn, op, src, is_32,
                 );
 
+                // Handle the taken branch: defer it (or handle back-edge).
                 if target <= pc {
-                    // Back-edge on the taken branch.
                     match handle_back_edge(target, &taken_state, &taken_stack, &mut loop_heads) {
-                        BackEdgeResult::Continue(widened_state, widened_stack) => {
-                            work.push(WorkItem {
-                                pc: target,
-                                state: widened_state,
-                                stack: widened_stack,
-                                depth: depth + 1,
+                        BackEdgeResult::Continue(ws, wst) => {
+                            backtrack.push(WorkItem {
+                                pc: target, state: ws, stack: wst,
                             });
                         }
-                        BackEdgeResult::FixedPoint => {
-                            // Loop body already verified with wider state.
-                        }
+                        BackEdgeResult::FixedPoint => {}
                         BackEdgeResult::Exceeded => {
                             errors.push(
                                 VerifyError::new(pc, ErrorKind::UnboundedLoop { target_pc: target })
@@ -364,55 +353,49 @@ pub fn check_with_relocs(
                         }
                     }
                 } else {
-                    work.push(WorkItem {
+                    // Defer the taken branch for later exploration.
+                    backtrack.push(WorkItem {
                         pc: target,
                         state: taken_state,
                         stack: taken_stack,
-                        depth: depth + 1,
                     });
                 }
 
-                work.push(WorkItem {
-                    pc: pc + 1,
-                    state: fall_state,
-                    stack: fall_stack,
-                    depth: depth + 1,
-                });
+                // Continue with fallthrough.
+                pc += 1;
             }
             Opcode::Alu64(op, src) | Opcode::Alu32(op, src) => {
                 let is_64 = matches!(insn.opcode, Opcode::Alu64(..));
 
-                // Check source operands readable
                 if op != AluOp::Mov {
                     if let Some(err) = check_reg_readable(&state, insn.dst, pc, loc) {
                         errors.push(err);
+                        pc = usize::MAX;
                         continue;
                     }
                 }
                 if src == Source::Reg {
                     if let Some(err) = check_reg_readable(&state, insn.src, pc, loc) {
                         errors.push(err);
+                        pc = usize::MAX;
                         continue;
                     }
                 }
 
                 if let Some(err) = check_alu(&mut state, insn, op, src, is_64, pc, loc) {
                     errors.push(err);
-                    continue;
+                    pc = usize::MAX;
+                } else {
+                    pc += 1;
                 }
-
-                work.push(WorkItem { pc: pc + 1, state, stack, depth: depth + 1 });
             }
             Opcode::LdImm64 => {
                 if let Some(reloc) = relocations.get(&pc) {
-                    // This LD_IMM64 will be patched by the loader.
                     match reloc {
                         RelocTarget::Map { .. } => {
-                            // Map fd -- treated as a scalar (helpers expect scalar map fds).
                             state.set(insn.dst, RegState::scalar_unknown());
                         }
                         RelocTarget::Data { name } => {
-                            // Global data pointer -- readable.
                             state.set(insn.dst, RegState {
                                 reg_type: RegType::DataPtr { name: name.clone() },
                                 tnum: Tnum::unknown(),
@@ -423,13 +406,6 @@ pub fn check_with_relocs(
                             });
                         }
                         RelocTarget::CoreFieldOffset => {
-                            // CO-RE field byte offset. The value will be
-                            // patched to a kernel struct field offset at
-                            // load time. It's typically added to a kernel
-                            // pointer and used as a source address for
-                            // bpf_probe_read_kernel. We type it as a
-                            // kernel pointer since it represents a kernel
-                            // memory location.
                             state.set(insn.dst, RegState::kernel_ptr());
                         }
                     }
@@ -437,58 +413,59 @@ pub fn check_with_relocs(
                     let val = insn.imm64.unwrap_or(insn.imm as u32 as u64);
                     state.set(insn.dst, RegState::scalar_value(val));
                 }
-                // The ELF parser already collapses LdImm64's two 8-byte
-                // slots into a single BpfInsn, so we advance by 1 here
-                // (not 2).
-                work.push(WorkItem { pc: pc + 1, state, stack, depth: depth + 1 });
+                pc += 1;
             }
             Opcode::Ldx(w) => {
                 if let Some(err) = check_reg_readable(&state, insn.src, pc, loc) {
                     errors.push(err);
+                    pc = usize::MAX;
                     continue;
                 }
                 if let Some(err) = check_load(&mut state, &stack, insn, w, pc, loc, source_locs) {
                     errors.push(err);
-                    continue;
+                    pc = usize::MAX;
+                } else {
+                    pc += 1;
                 }
-                work.push(WorkItem { pc: pc + 1, state, stack, depth: depth + 1 });
             }
             Opcode::Stx(w) => {
                 if let Some(err) = check_reg_readable(&state, insn.dst, pc, loc) {
                     errors.push(err);
+                    pc = usize::MAX;
                     continue;
                 }
                 if let Some(err) = check_reg_readable(&state, insn.src, pc, loc) {
                     errors.push(err);
+                    pc = usize::MAX;
                     continue;
                 }
                 if let Some(err) = check_store(&state, &mut stack, insn, w, false, pc, loc, source_locs) {
                     errors.push(err);
-                    continue;
+                    pc = usize::MAX;
+                } else {
+                    pc += 1;
                 }
-                work.push(WorkItem { pc: pc + 1, state, stack, depth: depth + 1 });
             }
             Opcode::St(w) => {
                 if let Some(err) = check_reg_readable(&state, insn.dst, pc, loc) {
                     errors.push(err);
+                    pc = usize::MAX;
                     continue;
                 }
                 if let Some(err) = check_store(&state, &mut stack, insn, w, true, pc, loc, source_locs) {
                     errors.push(err);
-                    continue;
+                    pc = usize::MAX;
+                } else {
+                    pc += 1;
                 }
-                work.push(WorkItem { pc: pc + 1, state, stack, depth: depth + 1 });
             }
         }
     }
 
-    // If no path reached an EXIT instruction, the programme doesn't terminate.
     if !reached_exit && !errors.iter().any(|e| matches!(e.kind, ErrorKind::ComplexityExceeded { .. })) {
         errors.push(VerifyError::new(0, ErrorKind::FallThrough));
     }
 
-    // Deduplicate errors by (pc, error kind). We use a seen-set rather than
-    // sort+dedup because errors should preserve discovery order.
     {
         let mut seen = HashSet::new();
         errors.retain(|e| {
