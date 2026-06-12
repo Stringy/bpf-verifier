@@ -607,7 +607,8 @@ impl StackState {
     }
 
     /// Widen two stack states: a byte is initialised only if it's
-    /// initialised in both states. Spills are kept only if identical.
+    /// initialised in both states. Spills are widened using the same
+    /// strategy as registers: keep self's type when types differ.
     pub fn widen(&self, other: &StackState) -> StackState {
         let mut init = [false; 512];
         for (i, slot) in init.iter_mut().enumerate() {
@@ -616,9 +617,11 @@ impl StackState {
         let mut spills = std::collections::HashMap::new();
         for (offset, reg) in &self.spills {
             if let Some(other_reg) = other.spills.get(offset) {
-                if reg == other_reg {
-                    spills.insert(*offset, reg.clone());
-                }
+                // Both states have a spill at this offset: widen them.
+                spills.insert(*offset, reg.widen(other_reg));
+            } else {
+                // Only self has a spill here: keep it (loop entry state).
+                spills.insert(*offset, reg.clone());
             }
         }
         StackState { init, spills }

@@ -879,6 +879,32 @@ fn check_alu(
         }
     }
 
+    // Reverse-operand pointer arithmetic: scalar + ptr → ptr.
+    // BPF ADD is commutative: if the pointer is in src and the scalar
+    // offset is in dst, swap roles and apply pointer arithmetic rules.
+    if op == AluOp::Add && src_type.is_ptr() {
+        let delta = dst_state.tnum.known_value().map(|v| v as i64);
+        let new_type = match (&src_type, delta) {
+            (RegType::FramePtr { offset }, Some(d)) => RegType::FramePtr { offset: offset + d },
+            (RegType::CtxPtr { offset }, Some(d)) => RegType::CtxPtr { offset: offset + d },
+            (RegType::MapValuePtr { id, offset, size, origin_pc }, Some(d)) => {
+                RegType::MapValuePtr { id: *id, offset: offset + d, size: *size, origin_pc: *origin_pc }
+            }
+            (RegType::RingBufPtr { id, offset, size, origin_pc }, Some(d)) => {
+                RegType::RingBufPtr { id: *id, offset: offset + d, size: *size, origin_pc: *origin_pc }
+            }
+            (RegType::KernelPtr, _) => RegType::KernelPtr,
+            (RegType::DataPtr { name }, _) => RegType::DataPtr { name: name.clone() },
+            // Unknown offset with sized pointer: demote.
+            _ => RegType::Scalar,
+        };
+        state.set(dst_reg, RegState {
+            reg_type: new_type,
+            ..RegState::scalar_unknown()
+        });
+        return None;
+    }
+
     // Scalar ALU: compute result using tnum.
     let dst_tnum = dst_state.tnum;
     let src_tnum = match src {
