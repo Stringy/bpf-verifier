@@ -1623,7 +1623,34 @@ fn refine_scalar_64(
             fs.refine_bounds();
             fall.set(dst, fs);
         }
-        JmpOp::Jset | JmpOp::Ja => {}
+        JmpOp::Jset => {
+            // JSET dst, src: taken if (dst & val) != 0, fall if (dst & val) == 0.
+            //
+            // Fallthrough: all bits in `val` are definitely zero in dst.
+            // We can mark those bit positions as known-zero in the tnum.
+            let mut fs = fall.get(dst).clone();
+            fs.tnum.value &= !val;
+            fs.tnum.mask &= !val;
+            // If the tested bits included all bits above a threshold,
+            // the unsigned max can be tightened.
+            fs.umax = fs.umax.min(fs.tnum.max_value());
+            fs.umin = fs.umin.max(fs.tnum.min_value());
+            fs.refine_bounds();
+            fall.set(dst, fs);
+
+            // Taken: at least one bit in `val` is set in dst.
+            // If val has exactly one bit set, that bit must be set in dst.
+            if val.count_ones() == 1 {
+                let mut ts = taken.get(dst).clone();
+                ts.tnum.value |= val;
+                ts.tnum.mask &= !val;
+                ts.umin = ts.umin.max(ts.tnum.min_value());
+                ts.umax = ts.umax.min(ts.tnum.max_value());
+                ts.refine_bounds();
+                taken.set(dst, ts);
+            }
+        }
+        JmpOp::Ja => {}
     }
 }
 
@@ -1772,7 +1799,38 @@ fn refine_scalar_32(
                 fall.set(dst, fs);
             }
         }
-        JmpOp::Jset | JmpOp::Ja => {}
+        JmpOp::Jset => {
+            // JSET with 32-bit comparison: only the low 32 bits are tested.
+            let val32 = val & 0xFFFF_FFFF;
+
+            // Fallthrough: (low32(dst) & val32) == 0 -- tested bits are zero.
+            let mut fs = fall.get(dst).clone();
+            // Clear the tested bits in the low 32 bits of the tnum only.
+            let clear_mask = val32; // bits to mark as known-zero
+            fs.tnum.value &= !clear_mask;
+            fs.tnum.mask &= !clear_mask;
+            if fs.umax <= 0xFFFF_FFFF {
+                fs.umax = fs.umax.min(fs.tnum.max_value());
+                fs.umin = fs.umin.max(fs.tnum.min_value());
+            }
+            fs.refine_bounds();
+            fall.set(dst, fs);
+
+            // Taken: (low32(dst) & val32) != 0 -- at least one tested bit is set.
+            // If exactly one bit is tested, we know that bit is set.
+            if val32.count_ones() == 1 {
+                let mut ts = taken.get(dst).clone();
+                ts.tnum.value |= val32;
+                ts.tnum.mask &= !val32;
+                if ts.umax <= 0xFFFF_FFFF {
+                    ts.umin = ts.umin.max(ts.tnum.min_value());
+                    ts.umax = ts.umax.min(ts.tnum.max_value());
+                }
+                ts.refine_bounds();
+                taken.set(dst, ts);
+            }
+        }
+        JmpOp::Ja => {}
     }
 }
 
@@ -2335,5 +2393,112 @@ mod tests {
             err.reg_written_at, Some(0),
             "expected register provenance at insn 0, got: {:?}", err.reg_written_at
         );
+    }
+
+    #[test]
+    fn jset_fallthrough_clears_tested_bits() {
+        // Test that JSET refinement marks tested bits as known-zero on
+        // the fallthrough path.
+        //
+        // ldx w32 r0, [r1+0]     -- r0 = unknown scalar from ctx
+        // jset r0, 0x3, +1       -- taken: (r0 & 0x3) != 0
+        // exit                    -- fall: (r0 & 0x3) == 0, so bits 0,1 are zero
+        // exit                    -- taken
+        //
+        // We verify this indirectly: the programme should pass (both
+        // paths exit with a scalar r0) and the refinement is exercised.
+        // Direct state inspection is done via the refine_scalar_64 unit test below.
+        let insns = vec![
+            BpfInsn {
+                opcode: Opcode::Ldx(MemWidth::W),
+                dst: Reg::R0, src: Reg::R1, offset: 0, imm: 0, imm64: None,
+            },
+            BpfInsn {
+                opcode: Opcode::Jmp64(JmpOp::Jset, Source::Imm),
+                dst: Reg::R0, src: Reg::R0, offset: 1, imm: 0x3, imm64: None,
+            },
+            BpfInsn::decode(0x0000_0000_0000_0095).unwrap(), // exit (fall)
+            BpfInsn::decode(0x0000_0000_0000_0095).unwrap(), // exit (taken)
+        ];
+        let result = check(&insns, &empty_locs(4));
+        assert!(result.passed(), "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn jset_refine_scalar_64_fallthrough() {
+        // Directly test that refine_scalar_64 for JSET clears bits on fallthrough.
+        let mut taken = VerifierState::entry();
+        let mut fall = VerifierState::entry();
+        taken.set(Reg::R0, RegState::scalar_unknown());
+        fall.set(Reg::R0, RegState::scalar_unknown());
+
+        refine_scalar_64(&mut taken, &mut fall, Reg::R0, JmpOp::Jset, 0xFF);
+
+        // Fallthrough: bits 0-7 must be zero.
+        let fs = fall.get(Reg::R0);
+        assert_eq!(fs.tnum.value & 0xFF, 0, "low 8 bits of value should be zero");
+        assert_eq!(fs.tnum.mask & 0xFF, 0, "low 8 bits of mask should be zero (known)");
+
+        // Taken: val has multiple bits set, so we can't say which is set.
+        let ts = taken.get(Reg::R0);
+        // Should still be fully unknown (no refinement for multi-bit JSET on taken path).
+        assert_eq!(ts.tnum.mask, u64::MAX, "taken tnum should still be fully unknown");
+    }
+
+    #[test]
+    fn jset_refine_scalar_64_single_bit_taken() {
+        // When JSET tests exactly one bit, the taken path knows that bit is set.
+        let mut taken = VerifierState::entry();
+        let mut fall = VerifierState::entry();
+        taken.set(Reg::R0, RegState::scalar_unknown());
+        fall.set(Reg::R0, RegState::scalar_unknown());
+
+        refine_scalar_64(&mut taken, &mut fall, Reg::R0, JmpOp::Jset, 0x80);
+
+        // Taken: bit 7 must be set.
+        let ts = taken.get(Reg::R0);
+        assert_eq!(ts.tnum.value & 0x80, 0x80, "bit 7 should be known-one on taken");
+        assert_eq!(ts.tnum.mask & 0x80, 0, "bit 7 should be known (not masked)");
+        assert!(ts.umin >= 0x80, "umin should be at least 0x80");
+
+        // Fallthrough: bit 7 must be zero.
+        let fs = fall.get(Reg::R0);
+        assert_eq!(fs.tnum.value & 0x80, 0, "bit 7 should be known-zero on fall");
+        assert_eq!(fs.tnum.mask & 0x80, 0, "bit 7 should be known (not masked)");
+    }
+
+    #[test]
+    fn jset32_refine_fallthrough() {
+        // Test JMP32 JSET: only low 32 bits are affected.
+        let mut taken = VerifierState::entry();
+        let mut fall = VerifierState::entry();
+        taken.set(Reg::R0, RegState::scalar_unknown());
+        fall.set(Reg::R0, RegState::scalar_unknown());
+
+        refine_scalar_32(&mut taken, &mut fall, Reg::R0, JmpOp::Jset, 0xF);
+
+        // Fallthrough: low 4 bits of the 32-bit value must be zero.
+        let fs = fall.get(Reg::R0);
+        assert_eq!(fs.tnum.value & 0xF, 0, "low 4 bits should be zero on fall");
+        assert_eq!(fs.tnum.mask & 0xF, 0, "low 4 bits should be known on fall");
+        // Upper 32 bits should still be unknown.
+        assert_eq!(fs.tnum.mask & 0xFFFF_FFFF_0000_0000, 0xFFFF_FFFF_0000_0000,
+            "upper 32 bits should remain unknown");
+    }
+
+    #[test]
+    fn jset32_single_bit_taken() {
+        // JMP32 JSET with a single bit: taken path knows that bit is set.
+        let mut taken = VerifierState::entry();
+        let mut fall = VerifierState::entry();
+        taken.set(Reg::R0, RegState::scalar_unknown());
+        fall.set(Reg::R0, RegState::scalar_unknown());
+
+        refine_scalar_32(&mut taken, &mut fall, Reg::R0, JmpOp::Jset, 0x100);
+
+        // Taken: bit 8 must be set.
+        let ts = taken.get(Reg::R0);
+        assert_eq!(ts.tnum.value & 0x100, 0x100, "bit 8 should be set on taken");
+        assert_eq!(ts.tnum.mask & 0x100, 0, "bit 8 should be known on taken");
     }
 }
