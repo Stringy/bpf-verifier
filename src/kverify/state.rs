@@ -589,6 +589,11 @@ impl StackState {
         self.spills.remove(&offset);
     }
 
+    /// Mutable iterator over all spilled register states.
+    pub fn spills_mut(&mut self) -> impl Iterator<Item = &mut RegState> {
+        self.spills.values_mut()
+    }
+
     /// Whether `self` is a substate of `other` for stack initialisation.
     /// True when every byte initialised in `other` is also initialised in `self`
     /// (i.e., `self` has at least as much written as `other`).

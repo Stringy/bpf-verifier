@@ -290,10 +290,11 @@ pub fn check_with_relocs(
 
                 // Refine both branch states.
                 let mut taken_state = state.clone();
-                let taken_stack = stack.clone();
+                let mut taken_stack = stack.clone();
                 // state/stack become the fallthrough state after refinement.
                 refine_branch(
-                    &mut taken_state, &mut state,
+                    &mut taken_state, &mut taken_stack,
+                    &mut state, &mut stack,
                     insn, op, src, is_32,
                 );
 
@@ -1221,9 +1222,11 @@ fn check_store(
                 );
             }
             // For 8-byte stores from a register, track as a spill.
+            // Includes PtrOrNull so that null-check refinement can
+            // propagate through stack spills.
             if !is_st && width == 8 {
                 let val = state.get(insn.src);
-                if val.reg_type.is_ptr() {
+                if val.reg_type.is_ptr() || matches!(val.reg_type, RegType::PtrOrNull { .. }) {
                     stack.spill(eff_off, val);
                 } else {
                     stack.clear_spill(eff_off);
@@ -1359,7 +1362,9 @@ fn check_store(
 /// This is how the kernel verifier tracks null checks.
 fn refine_branch(
     taken: &mut VerifierState,
+    taken_stack: &mut StackState,
     fall: &mut VerifierState,
+    fall_stack: &mut StackState,
     insn: &BpfInsn,
     op: JmpOp,
     src: Source,
@@ -1395,13 +1400,17 @@ fn refine_branch(
                     // taken: ptr == 0 -> null
                     // fall: ptr != 0 -> valid pointer
                     refine_all_with_id(taken, ptr_id, &RegType::Null);
+                    refine_spills_with_id(taken_stack, ptr_id, &RegType::Null);
                     refine_all_with_id(fall, ptr_id, &inner);
+                    refine_spills_with_id(fall_stack, ptr_id, &inner);
                 }
                 JmpOp::Jne => {
                     // taken: ptr != 0 -> valid pointer
                     // fall: ptr == 0 -> null
                     refine_all_with_id(taken, ptr_id, &inner);
+                    refine_spills_with_id(taken_stack, ptr_id, &inner);
                     refine_all_with_id(fall, ptr_id, &RegType::Null);
+                    refine_spills_with_id(fall_stack, ptr_id, &RegType::Null);
                 }
                 _ => {}
             }
@@ -1417,6 +1426,21 @@ fn refine_branch(
                 refine_scalar_32(taken, fall, dst, op, val);
             } else {
                 refine_scalar_64(taken, fall, dst, op, val);
+            }
+        }
+    }
+}
+
+/// Refine all stack spills that hold a PtrOrNull with the given id.
+fn refine_spills_with_id(stack: &mut StackState, ptr_id: usize, new_type: &RegType) {
+    for spill in stack.spills_mut() {
+        if let RegType::PtrOrNull { id, .. } = &spill.reg_type {
+            if *id == ptr_id {
+                if *new_type == RegType::Null {
+                    *spill = RegState::null();
+                } else {
+                    spill.reg_type = new_type.clone();
+                }
             }
         }
     }
