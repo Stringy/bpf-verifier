@@ -739,20 +739,20 @@ fn check_call(
     if let Some(ArgType::PtrToMem | ArgType::PtrToStack) = helper.args[0] {
         if let RegType::FramePtr { offset: dst_off } = &state.get(Reg::R1).reg_type {
             let dst_off = *dst_off;
-            // Determine write size from arg2 (Size) if it's a known constant.
             let write_size = state.get(Reg::R2).tnum.known_value()
                 .unwrap_or(0)
                 .min(512) as u8;
             if write_size > 0 {
                 stack.mark_written(dst_off, write_size);
             }
-            // If reading 8 bytes from a kernel pointer, the result is
-            // also a kernel pointer (chained struct field access).
-            let src_is_kernel = matches!(
-                state.get(Reg::R3).reg_type,
-                RegType::KernelPtr
+            // probe_read_kernel/user read from kernel/user memory.
+            // An 8-byte read is typically a pointer-sized struct field,
+            // so spill it as KernelPtr for chained field access patterns.
+            let is_kernel_read = matches!(
+                helper.id,
+                4 | 113 | 115  // PROBE_READ, PROBE_READ_KERNEL, PROBE_READ_KERNEL_STR
             );
-            if write_size == 8 && src_is_kernel {
+            if write_size == 8 && is_kernel_read {
                 stack.spill(dst_off, &RegState::kernel_ptr());
             }
         }
