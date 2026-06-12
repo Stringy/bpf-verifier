@@ -52,12 +52,31 @@ impl IdGen {
     fn next(&mut self) -> usize { let id = self.0; self.0 += 1; id }
 }
 
-/// Back-edges (backward jumps) are handled by deferring them to the
-/// backtrack stack, just like forward branches. The state pruning at
-/// the target PC prevents infinite exploration: if the incoming state
-/// is subsumed by an already-explored state at that PC, the path is
-/// pruned. For actual loops, successive iterations gradually widen
-/// the explored states until a fixed point is reached.
+
+
+/// Pre-scan instructions to find PCs that are targets of backward jumps.
+fn find_back_edge_targets(
+    instructions: &[BpfInsn],
+    collapsed_to_raw: &[usize],
+    raw_to_collapsed: &HashMap<usize, usize>,
+) -> HashSet<usize> {
+    let mut targets = HashSet::new();
+    for (pc, insn) in instructions.iter().enumerate() {
+        let offset = match insn.opcode {
+            Opcode::JmpJa => Some(insn.offset),
+            Opcode::Jmp64(_, _) | Opcode::Jmp32(_, _) => Some(insn.offset),
+            _ => None,
+        };
+        if let Some(off) = offset {
+            if let Some(target) = resolve_branch_target(pc, off, collapsed_to_raw, raw_to_collapsed) {
+                if target <= pc {
+                    targets.insert(target);
+                }
+            }
+        }
+    }
+    targets
+}
 
 /// Build a mapping from raw BPF PC (counting LdImm64 as 2 slots) to collapsed
 /// instruction index (where LdImm64 is 1 entry). Returns a vec where entry `i`
@@ -131,12 +150,12 @@ pub fn check_with_relocs(
     // State pruning: at each PC, store previously-explored states.
     let mut explored: Vec<Vec<(VerifierState, StackState)>> =
         vec![Vec::new(); instructions.len()];
-    const MAX_STATES_PER_PC: usize = 16;
+    const MAX_STATES_PER_PC: usize = 32;
 
-    // Track back-edge targets. When a backward jump targets a PC, we
-    // widen the explored state there instead of storing a new one.
-    // This ensures loops converge to a fixed point.
-    let mut back_edge_targets: HashSet<usize> = HashSet::new();
+    // Back-edge targets: PCs that are jumped to from a later instruction.
+    // At these PCs, we widen the explored state rather than storing
+    // multiple exact states, ensuring loop convergence.
+    let back_edge_targets = find_back_edge_targets(instructions, &collapsed_to_raw, &raw_to_collapsed);
 
     // Current state: walk instructions sequentially starting at pc=0.
     let mut pc: usize = 0;
@@ -182,17 +201,16 @@ pub fn check_with_relocs(
             break;
         }
 
-        if back_edge_targets.contains(&pc) {
-            // At a loop head: widen the first stored state to subsume
-            // this iteration, ensuring convergence.
-            if let Some((prev_regs, prev_stack)) = explored[pc].first_mut() {
-                state = prev_regs.widen(&state);
-                stack = prev_stack.widen(&stack);
-                *prev_regs = state.clone();
-                *prev_stack = stack.clone();
-            } else {
-                explored[pc].push((state.clone(), stack.clone()));
-            }
+        if back_edge_targets.contains(&pc) && !explored[pc].is_empty() {
+            // At a back-edge target: widen the stored state so the loop
+            // converges. Each iteration adds its state to the widened
+            // approximation, and eventually the widened state subsumes
+            // new iterations.
+            let (prev_regs, prev_stack) = &mut explored[pc][0];
+            *prev_regs = prev_regs.widen(&state);
+            *prev_stack = prev_stack.widen(&stack);
+            state = prev_regs.clone();
+            stack = prev_stack.clone();
         } else if explored[pc].len() < MAX_STATES_PER_PC {
             explored[pc].push((state.clone(), stack.clone()));
         }
@@ -230,9 +248,6 @@ pub fn check_with_relocs(
                 let target = resolve_branch_target(pc, insn.offset, &collapsed_to_raw, &raw_to_collapsed);
                 match target {
                     Some(t) => {
-                        if t <= pc {
-                            back_edge_targets.insert(t);
-                        }
                         pc = t;
                     }
                     None => {
@@ -283,9 +298,6 @@ pub fn check_with_relocs(
                 );
 
                 // Defer the taken branch for later exploration.
-                if target <= pc {
-                    back_edge_targets.insert(target);
-                }
                 backtrack.push(WorkItem {
                     pc: target,
                     state: taken_state,

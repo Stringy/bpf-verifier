@@ -389,17 +389,21 @@ impl fmt::Display for RegState {
 
 impl RegState {
     /// Widen two register states into a single state that's a sound
-    /// overapproximation of both. Used at loop heads to compute fixed points.
+    /// overapproximation of both. Used at back-edge targets (loop heads)
+    /// to compute fixed points.
+    ///
+    /// When types differ, keeps `self` (the established loop head state).
+    /// Registers that change type between iterations are set between the
+    /// loop head and the back-edge, so the loop head's type is what the
+    /// loop body sees on entry. Widening to scalar would destroy pointer
+    /// types for goto/retry patterns where unrelated code jumps back.
     pub fn widen(&self, other: &RegState) -> RegState {
-        // If types differ, demote to the most general common type.
         if self.reg_type != other.reg_type {
-            // If either is uninit, the result must be uninit (we can't
-            // guarantee the register was written on all paths).
             if self.reg_type == RegType::Uninit || other.reg_type == RegType::Uninit {
                 return RegState::uninit();
             }
-            // Different non-uninit types -> widen to scalar.
-            return RegState::scalar_unknown();
+            // Different non-uninit types: keep self (the loop entry state).
+            return self.clone();
         }
 
         // Same type: widen the bounds.
