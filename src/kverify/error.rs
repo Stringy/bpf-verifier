@@ -16,6 +16,8 @@ pub struct VerifyError {
     /// Secondary source location: where the relevant pointer/value was
     /// created (e.g. the ringbuf_reserve or map_lookup_elem call).
     pub origin_loc: Option<SourceLoc>,
+    /// Debug: the instruction where the offending register was last written.
+    pub reg_written_at: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +111,7 @@ impl VerifyError {
             kind,
             source_loc: None,
             origin_loc: None,
+            reg_written_at: None,
         }
     }
 
@@ -119,6 +122,12 @@ impl VerifyError {
 
     pub fn with_origin(mut self, loc: Option<&SourceLoc>) -> Self {
         self.origin_loc = loc.cloned();
+        self
+    }
+
+    /// Attach the instruction where the offending register was last written.
+    pub fn with_reg_provenance(mut self, written_at: Option<usize>) -> Self {
+        self.reg_written_at = written_at;
         self
     }
 }
@@ -231,6 +240,14 @@ pub fn format_errors(
             if let Some(loc) = loc {
                 output.push_str(&format!("  = source: {}:{}\n", loc.file, loc.line));
             }
+            if let Some(written_at) = err.reg_written_at {
+                let written_loc = source_locs.get(written_at).and_then(|l| l.as_ref());
+                if let Some(wloc) = written_loc {
+                    output.push_str(&format!("  = register last written at insn #{written_at} ({}:{})\n", wloc.file, wloc.line));
+                } else {
+                    output.push_str(&format!("  = register last written at insn #{written_at}\n"));
+                }
+            }
             output.push('\n');
         }
     }
@@ -308,7 +325,11 @@ fn format_error_with_source(
         );
     }
 
-    builder = builder.with_note(format!("insn #{}", err.pc));
+    let mut note = format!("insn #{}", err.pc);
+    if let Some(written_at) = err.reg_written_at {
+        note.push_str(&format!(" (register last written at insn #{written_at})"));
+    }
+    builder = builder.with_note(note);
 
     let report = builder.finish();
     let mut buf = Vec::new();

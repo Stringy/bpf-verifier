@@ -347,6 +347,7 @@ pub fn check_with_relocs(
                                 smax: i64::MAX,
                                 umin: 0,
                                 umax: u64::MAX,
+                                written_at: None,
                             });
                         }
                         RelocTarget::CoreFieldOffset => {
@@ -629,6 +630,7 @@ fn check_call(
                 smax: i64::MAX,
                 umin: 0,
                 umax: u64::MAX,
+                written_at: None,
             });
         }
         HelperReturn::RingBufPtr => {
@@ -650,6 +652,7 @@ fn check_call(
                 smax: i64::MAX,
                 umin: 0,
                 umax: u64::MAX,
+                written_at: None,
             });
         }
     }
@@ -1002,6 +1005,7 @@ fn check_alu(
             smax: t.max_value() as i64,
             umin: t.min_value(),
             umax: t.max_value(),
+            written_at: None,
         }
     } else {
         RegState {
@@ -1011,6 +1015,7 @@ fn check_alu(
             smax: result_tnum.max_value() as i64,
             umin: result_tnum.min_value(),
             umax: result_tnum.max_value(),
+            written_at: None,
         }
     };
     result.refine_bounds();
@@ -1187,7 +1192,6 @@ fn check_load(
             );
         }
         RegType::Scalar => {
-            // Loading from a scalar -- this is not a valid pointer.
             return Some(
                 VerifyError::new(
                     pc,
@@ -1196,7 +1200,8 @@ fn check_load(
                         actual: format!("{}", base.reg_type),
                     },
                 )
-                .with_source(loc),
+                .with_source(loc)
+                .with_reg_provenance(base.written_at),
             );
         }
         RegType::Uninit => {
@@ -1391,7 +1396,8 @@ fn check_store(
                         actual: "scalar".to_string(),
                     },
                 )
-                .with_source(loc),
+                .with_source(loc)
+                .with_reg_provenance(base.written_at),
             );
         }
         RegType::Uninit => {

@@ -239,7 +239,10 @@ impl fmt::Display for RegType {
 }
 
 /// Full state of a single register: type + scalar bounds.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq`/`Eq` are implemented manually to exclude `written_at`
+/// (provenance metadata that shouldn't affect state comparison).
+#[derive(Debug, Clone)]
 pub struct RegState {
     pub reg_type: RegType,
     /// Tracked number for scalar range analysis.
@@ -250,7 +253,22 @@ pub struct RegState {
     /// Unsigned bounds.
     pub umin: u64,
     pub umax: u64,
+    /// Instruction that last wrote this register (debug provenance).
+    pub written_at: Option<usize>,
 }
+
+impl PartialEq for RegState {
+    fn eq(&self, other: &Self) -> bool {
+        self.reg_type == other.reg_type
+            && self.tnum == other.tnum
+            && self.smin == other.smin
+            && self.smax == other.smax
+            && self.umin == other.umin
+            && self.umax == other.umax
+    }
+}
+
+impl Eq for RegState {}
 
 impl RegState {
     pub fn uninit() -> Self {
@@ -261,6 +279,7 @@ impl RegState {
             smax: i64::MAX,
             umin: 0,
             umax: u64::MAX,
+            written_at: None,
         }
     }
 
@@ -272,6 +291,7 @@ impl RegState {
             smax: i64::MAX,
             umin: 0,
             umax: u64::MAX,
+            written_at: None,
         }
     }
 
@@ -283,6 +303,7 @@ impl RegState {
             smax: v as i64,
             umin: v,
             umax: v,
+            written_at: None,
         }
     }
 
@@ -294,6 +315,7 @@ impl RegState {
             smax: i64::MAX,
             umin: 0,
             umax: u64::MAX,
+            written_at: None,
         }
     }
 
@@ -305,6 +327,7 @@ impl RegState {
             smax: i64::MAX,
             umin: 0,
             umax: u64::MAX,
+            written_at: None,
         }
     }
 
@@ -316,6 +339,7 @@ impl RegState {
             smax: i64::MAX,
             umin: 0,
             umax: u64::MAX,
+            written_at: None,
         }
     }
 
@@ -327,6 +351,7 @@ impl RegState {
             smax: 0,
             umin: 0,
             umax: 0,
+            written_at: None,
         }
     }
 
@@ -370,6 +395,12 @@ impl RegState {
     /// Whether we can read this register (not uninit).
     pub fn is_readable(&self) -> bool {
         self.reg_type != RegType::Uninit
+    }
+
+    /// Set the provenance PC (where this register was last written).
+    pub fn at(mut self, pc: usize) -> Self {
+        self.written_at = Some(pc);
+        self
     }
 }
 
@@ -421,6 +452,7 @@ impl RegState {
                     smax: self.smax.max(other.smax),
                     umin: self.umin.min(other.umin),
                     umax: self.umax.max(other.umax),
+                    written_at: None,
                 };
                 result.refine_bounds();
                 result
@@ -489,11 +521,30 @@ impl VerifierState {
         self.regs[reg.index() as usize] = state;
     }
 
+    /// Set a register and record provenance (the PC that wrote it).
+    pub fn set_at(&mut self, reg: Reg, mut state: RegState, pc: usize) {
+        state.written_at = Some(pc);
+        self.regs[reg.index() as usize] = state;
+    }
+
     /// Widen all registers: produce a state that's a sound overapproximation
     /// of both `self` and `other`.
     pub fn widen(&self, other: &VerifierState) -> VerifierState {
         let regs = std::array::from_fn(|i| self.regs[i].widen(&other.regs[i]));
         VerifierState { regs }
+    }
+
+    /// Format a compact summary of the register state for debugging.
+    pub fn dump(&self) -> String {
+        let mut parts = Vec::new();
+        for i in 0..11u8 {
+            let r = &self.regs[i as usize];
+            if r.reg_type != RegType::Uninit {
+                let prov = r.written_at.map(|pc| format!("@{pc}")).unwrap_or_default();
+                parts.push(format!("r{i}={}{prov}", r.reg_type));
+            }
+        }
+        parts.join(" ")
     }
 
     /// Whether `self` is a substate of `other` for all registers.
