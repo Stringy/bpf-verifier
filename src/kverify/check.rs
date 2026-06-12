@@ -804,13 +804,27 @@ fn check_alu(
 
     // Pointer arithmetic rules.
     if dst_state.reg_type.is_ptr() {
+        // KernelPtr is opaque -- any ALU operation on it still yields a
+        // value usable as a kernel address. This covers container_of
+        // (ptr - ptr + offset), offset masking (ptr & mask), and field
+        // arithmetic in CO-RE patterns.
+        if dst_state.reg_type == RegType::KernelPtr {
+            state.set(dst_reg, RegState::kernel_ptr());
+            return None;
+        }
+
         match op {
             AluOp::Add | AluOp::Sub => {
                 if src_type.is_ptr() {
                     if op == AluOp::Sub {
-                        // ptr - ptr produces a scalar (offset difference).
-                        // The kernel allows this for same-type pointers.
-                        state.set(dst_reg, RegState::scalar_unknown());
+                        // ptr - ptr produces a scalar (offset difference),
+                        // except for KernelPtr where the result is typically
+                        // used as a kernel address (container_of patterns).
+                        if matches!(dst_state.reg_type, RegType::KernelPtr) {
+                            state.set(dst_reg, RegState::kernel_ptr());
+                        } else {
+                            state.set(dst_reg, RegState::scalar_unknown());
+                        }
                         return None;
                     }
                     // ptr + ptr is never valid.
@@ -876,6 +890,12 @@ fn check_alu(
                 );
             }
         }
+    }
+
+    // scalar + KernelPtr → KernelPtr (container_of / offset calculations).
+    if op == AluOp::Add && src_type == RegType::KernelPtr {
+        state.set(dst_reg, RegState::kernel_ptr());
+        return None;
     }
 
     // Scalar ALU: compute result using tnum.
