@@ -161,11 +161,13 @@ pub enum RegType {
     FramePtr { offset: i64 },
     /// Pointer to a map value returned by map_lookup_elem. `id` distinguishes different lookups.
     /// `size` is the map value size (if known from BTF/map def).
-    MapValuePtr { id: usize, offset: i64, size: u32 },
+    /// `origin_pc` is the helper call that created this pointer.
+    MapValuePtr { id: usize, offset: i64, size: u32, origin_pc: usize },
     /// Pointer to the programme context (r1 at entry).
     CtxPtr { offset: i64 },
     /// Pointer to ring buffer reservation.
-    RingBufPtr { id: usize, offset: i64, size: u32 },
+    /// `origin_pc` is the ringbuf_reserve call that created this pointer.
+    RingBufPtr { id: usize, offset: i64, size: u32, origin_pc: usize },
     /// Pointer into kernel memory (loaded from ctx or via CO-RE field access).
     /// Dereferencing a KernelPtr yields another KernelPtr, modelling the
     /// chained field accesses in BPF_CORE_READ.
@@ -221,11 +223,11 @@ impl fmt::Display for RegType {
             RegType::Uninit => write!(f, "uninit"),
             RegType::Scalar => write!(f, "scalar"),
             RegType::FramePtr { offset } => write!(f, "fp{offset:+}"),
-            RegType::MapValuePtr { id, offset, size } => {
+            RegType::MapValuePtr { id, offset, size, .. } => {
                 write!(f, "map_value(id={id}, off={offset}, size={size})")
             }
             RegType::CtxPtr { offset } => write!(f, "ctx{offset:+}"),
-            RegType::RingBufPtr { id, offset, size } => {
+            RegType::RingBufPtr { id, offset, size, .. } => {
                 write!(f, "ringbuf(id={id}, off={offset}, size={size})")
             }
             RegType::KernelPtr => write!(f, "kernel_ptr"),

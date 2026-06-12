@@ -501,6 +501,27 @@ fn width_bytes(w: MemWidth) -> u8 {
     }
 }
 
+/// Extract the origin PC from a pointer type, if available.
+fn ptr_origin_pc(reg_type: &RegType) -> Option<usize> {
+    match reg_type {
+        RegType::MapValuePtr { origin_pc, .. } => Some(*origin_pc),
+        RegType::RingBufPtr { origin_pc, .. } => Some(*origin_pc),
+        RegType::PtrOrNull { origin_pc, .. } => *origin_pc,
+        _ => None,
+    }
+}
+
+/// Resolve an origin PC to a source location.
+fn resolve_origin(
+    origin_pc: Option<usize>,
+    source_locs: &[Option<SourceLoc>],
+) -> Option<SourceLoc> {
+    origin_pc
+        .and_then(|pc| source_locs.get(pc))
+        .and_then(|l| l.as_ref())
+        .cloned()
+}
+
 fn check_reg_readable(
     state: &VerifierState,
     reg: Reg,
@@ -668,6 +689,7 @@ fn check_call(
                 id,
                 offset: 0,
                 size: DEFAULT_MAP_VALUE_SIZE,
+                origin_pc: pc,
             };
             state.set(Reg::R0, RegState {
                 reg_type: RegType::PtrOrNull { inner: Box::new(inner), origin_pc: Some(pc), id },
@@ -688,6 +710,7 @@ fn check_call(
                 id,
                 offset: 0,
                 size: reserve_size,
+                origin_pc: pc,
             };
             state.set(Reg::R0, RegState {
                 reg_type: RegType::PtrOrNull { inner: Box::new(inner), origin_pc: Some(pc), id },
@@ -893,11 +916,11 @@ fn check_alu(
                     RegType::CtxPtr { offset } => {
                         RegType::CtxPtr { offset: offset + delta }
                     }
-                    RegType::MapValuePtr { id, offset, size } => {
-                        RegType::MapValuePtr { id: *id, offset: offset + delta, size: *size }
+                    RegType::MapValuePtr { id, offset, size, origin_pc } => {
+                        RegType::MapValuePtr { id: *id, offset: offset + delta, size: *size, origin_pc: *origin_pc }
                     }
-                    RegType::RingBufPtr { id, offset, size } => {
-                        RegType::RingBufPtr { id: *id, offset: offset + delta, size: *size }
+                    RegType::RingBufPtr { id, offset, size, origin_pc } => {
+                        RegType::RingBufPtr { id: *id, offset: offset + delta, size: *size, origin_pc: *origin_pc }
                     }
                     RegType::KernelPtr => RegType::KernelPtr,
                     RegType::DataPtr { name } => RegType::DataPtr { name: name.clone() },
@@ -1026,6 +1049,7 @@ fn check_load(
     let base = state.get(insn.src);
     let width = width_bytes(w);
     let offset = insn.offset as i64;
+    let origin = resolve_origin(ptr_origin_pc(&base.reg_type), source_locs);
 
     match &base.reg_type {
         RegType::FramePtr { offset: ptr_off } => {
@@ -1066,7 +1090,7 @@ fn check_load(
             }
             state.set(insn.dst, RegState::scalar_unknown());
         }
-        RegType::MapValuePtr { id: _, offset: ptr_off, size } => {
+        RegType::MapValuePtr { offset: ptr_off, size, .. } => {
             let eff_off = ptr_off + offset;
             if eff_off < 0 || eff_off + width as i64 > *size as i64 {
                 return Some(
@@ -1080,7 +1104,8 @@ fn check_load(
                             region_size: *size as i64,
                         },
                     )
-                    .with_source(loc),
+                    .with_source(loc)
+                    .with_origin(origin.as_ref()),
                 );
             }
             state.set(insn.dst, RegState::scalar_unknown());
@@ -1111,7 +1136,7 @@ fn check_load(
                 state.set(insn.dst, RegState::scalar_unknown());
             }
         }
-        RegType::RingBufPtr { id: _, offset: ptr_off, size } => {
+        RegType::RingBufPtr { offset: ptr_off, size, .. } => {
             let eff_off = ptr_off + offset;
             if eff_off < 0 || eff_off + width as i64 > *size as i64 {
                 return Some(
@@ -1125,7 +1150,8 @@ fn check_load(
                             region_size: *size as i64,
                         },
                     )
-                    .with_source(loc),
+                    .with_source(loc)
+                    .with_origin(origin.as_ref()),
                 );
             }
             state.set(insn.dst, RegState::scalar_unknown());
@@ -1215,6 +1241,7 @@ fn check_store(
     let base = state.get(insn.dst);
     let width = width_bytes(w);
     let offset = insn.offset as i64;
+    let origin = resolve_origin(ptr_origin_pc(&base.reg_type), source_locs);
 
     // Check that the value being stored doesn't leak a BPF-managed pointer
     // to an untracked destination. Stores to stack (spills) and map values
@@ -1291,7 +1318,8 @@ fn check_store(
                             region_size: *size as i64,
                         },
                     )
-                    .with_source(loc),
+                    .with_source(loc)
+                    .with_origin(origin.as_ref()),
                 );
             }
         }
@@ -1319,7 +1347,7 @@ fn check_store(
                 return Some(
                     VerifyError::new(
                         pc,
-                        ErrorKind::OutOfBoundsAccess {
+                         ErrorKind::OutOfBoundsAccess {
                             reg: insn.dst,
                             ptr_kind: "ring buffer",
                             offset: eff_off,
@@ -1327,7 +1355,8 @@ fn check_store(
                             region_size: *size as i64,
                         },
                     )
-                    .with_source(loc),
+                    .with_source(loc)
+                    .with_origin(origin.as_ref()),
                 );
             }
         }

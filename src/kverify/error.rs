@@ -13,6 +13,9 @@ pub struct VerifyError {
     pub kind: ErrorKind,
     /// DWARF source location (file:line), if available.
     pub source_loc: Option<SourceLoc>,
+    /// Secondary source location: where the relevant pointer/value was
+    /// created (e.g. the ringbuf_reserve or map_lookup_elem call).
+    pub origin_loc: Option<SourceLoc>,
 }
 
 #[derive(Debug, Clone)]
@@ -105,11 +108,17 @@ impl VerifyError {
             pc,
             kind,
             source_loc: None,
+            origin_loc: None,
         }
     }
 
     pub fn with_source(mut self, loc: Option<&SourceLoc>) -> Self {
         self.source_loc = loc.cloned();
+        self
+    }
+
+    pub fn with_origin(mut self, loc: Option<&SourceLoc>) -> Self {
+        self.origin_loc = loc.cloned();
         self
     }
 }
@@ -254,27 +263,20 @@ fn format_error_with_source(
     let line_end = line_start + line_text.len();
 
     let file_id: String = loc.path.clone();
-    // Clone for the origin label if needed.
-    let origin_id: String;
-    let origin_src: Option<&str>;
-    let origin_range: std::ops::Range<usize>;
-
-    let mut has_origin = false;
-
-    if let ErrorKind::NullPointerDeref { origin_loc: Some(ref oloc), .. } = err.kind
-        && let Some(osrc) = c_sources.get(&oloc.path)
-    {
-        origin_id = oloc.path.clone();
-        let ostart = byte_offset_of_line(osrc, oloc.line as usize);
-        let oline = osrc[ostart..].lines().next().unwrap_or("");
-        origin_range = ostart..ostart + oline.len();
-        origin_src = Some(osrc.as_str());
-        has_origin = true;
-    } else {
-        origin_id = String::new();
-        origin_range = 0..0;
-        origin_src = None;
-    }
+    let (has_origin, origin_id, origin_range, origin_src) =
+        if let Some(ref oloc) = err.origin_loc
+            && let Some(osrc) = c_sources.get(&oloc.path)
+        {
+            let ostart = byte_offset_of_line(osrc, oloc.line as usize);
+            if let Some(rest) = osrc.get(ostart..) {
+                let oline = rest.lines().next().unwrap_or("");
+                (true, oloc.path.clone(), ostart..ostart + oline.len(), Some(osrc.as_str()))
+            } else {
+                (false, String::new(), 0..0, None)
+            }
+        } else {
+            (false, String::new(), 0..0, None)
+        };
 
     let mut builder = Report::build(ReportKind::Error, (file_id.clone(), line_start..line_end))
         .with_config(config)
@@ -287,9 +289,21 @@ fn format_error_with_source(
     );
 
     if has_origin {
+        let origin_msg = match &err.kind {
+            ErrorKind::NullPointerDeref { .. } => "returns a possibly-null pointer",
+            ErrorKind::OutOfBoundsAccess { region_size, .. } => {
+                // Use a static string; the size is already in the main message.
+                if *region_size < 64 {
+                    "reserved here"
+                } else {
+                    "allocated here"
+                }
+            }
+            _ => "created here",
+        };
         builder = builder.with_label(
             Label::new((origin_id.clone(), origin_range))
-                .with_message("returns a possibly-null pointer")
+                .with_message(origin_msg)
                 .with_color(Color::Yellow),
         );
     }
