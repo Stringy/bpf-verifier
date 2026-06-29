@@ -16,7 +16,6 @@
 *)
 module Verify_{{ program_name }}
 
-open FStar.Mul
 open FStar.Tactics.V2
 open BPF.State
 open BPF.Semantics

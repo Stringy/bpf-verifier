@@ -19,7 +19,6 @@
 *)
 module BPF.State
 
-open FStar.Mul
 open FStar.UInt64
 
 (* --- Register values ---

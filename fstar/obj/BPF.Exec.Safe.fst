@@ -30,7 +30,6 @@
 *)
 module BPF.Exec.Safe
 
-open FStar.Mul
 open FStar.UInt64
 open FStar.UInt32
 open FStar.Int32

@@ -22,7 +22,6 @@
      clarity over reuse. *)
 module BPF.Exec.Path
 
-open FStar.Mul
 open FStar.UInt64
 open FStar.UInt32
 open FStar.Int32

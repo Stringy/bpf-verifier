@@ -41,7 +41,6 @@
 *)
 module BPF.Check.TypeSafety
 
-open FStar.Mul
 open FStar.Int32
 open BPF.State
 open BPF.Helpers

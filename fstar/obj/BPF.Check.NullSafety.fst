@@ -40,7 +40,6 @@
 *)
 module BPF.Check.NullSafety
 
-open FStar.Mul
 open FStar.Int32
 open BPF.State
 open BPF.Helpers

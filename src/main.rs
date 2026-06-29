@@ -444,14 +444,12 @@ fn verify_program(
     }
 
     let include_dirs = vec![project_root.join("fstar/obj"), tmp_dir.path().to_path_buf()];
-    let cache_dir = project_root.join("fstar/obj/.cache");
     let runner = if let Some(override_path) = fstar_path_override {
         FstarRunner::new(override_path.to_path_buf(), include_dirs)
     } else {
         FstarRunner::find_fstar(project_root, include_dirs)
             .map_err(|e| format!("{e}"))?
-    }
-    .with_cache(cache_dir);
+    };
 
     match runner.verify(&fst_path) {
         Ok(VerifyResult::Pass) => Ok(true),
@@ -711,8 +709,6 @@ fn run_ast_verify(
 
     let root = project_root();
     let ast_fstar_dir = root.join("fstar/ast");
-    let cache_dir = ast_fstar_dir.join("_cache");
-    std::fs::create_dir_all(&cache_dir).ok();
 
     eprintln!("Verifying {}...", source_name);
 
@@ -720,7 +716,6 @@ fn run_ast_verify(
         .args([
             "--include", &ast_fstar_dir.to_string_lossy(),
             "--cache_checked_modules",
-            "--cache_dir", &cache_dir.to_string_lossy(),
         ])
         .arg(&fst_path)
         .output();

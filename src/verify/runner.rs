@@ -1,19 +1,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[derive(Debug, thiserror::Error)]
+use thiserror::Error;
+
+#[derive(Debug, Error)]
 pub enum VerifyError {
     #[error("F* binary not found at {0}")]
     FstarNotFound(PathBuf),
-
     #[error("failed to invoke F*: {0}")]
-    FstarInvocation(#[source] std::io::Error),
-
-    #[error("verification failed: {0}")]
-    VerificationFailed(String),
+    FstarInvocation(std::io::Error),
 }
 
-#[derive(Debug, PartialEq, Eq)]
 pub enum VerifyResult {
     Pass,
     Fail { message: String },
@@ -22,7 +19,6 @@ pub enum VerifyResult {
 pub struct FstarRunner {
     fstar_path: PathBuf,
     include_dirs: Vec<PathBuf>,
-    cache_dir: Option<PathBuf>,
 }
 
 impl FstarRunner {
@@ -30,15 +26,7 @@ impl FstarRunner {
         Self {
             fstar_path,
             include_dirs,
-            cache_dir: None,
         }
-    }
-
-    pub fn with_cache(mut self, cache_dir: PathBuf) -> Self {
-        if cache_complete(&cache_dir) {
-            self.cache_dir = Some(cache_dir);
-        }
-        self
     }
 
     /// Look for the F* binary relative to the project root, falling back to
@@ -57,6 +45,10 @@ impl FstarRunner {
     }
 
     /// Run F* on the given file and return whether verification succeeded.
+    ///
+    /// F* handles caching automatically via --cache_checked_modules.
+    /// If .checked files exist next to the .fst files (from a previous
+    /// make check-obj or container build), F* will skip re-verification.
     pub fn verify(&self, fstar_file: &Path) -> Result<VerifyResult, VerifyError> {
         let mut cmd = Command::new(&self.fstar_path);
 
@@ -64,13 +56,9 @@ impl FstarRunner {
             cmd.arg("--include").arg(dir);
         }
 
+        cmd.args(["--cache_checked_modules"]);
         cmd.args(["--fuel", "8", "--ifuel", "2", "--z3rlimit", "30"]);
         cmd.args(["--message_format", "json"]);
-
-        if let Some(cache) = &self.cache_dir {
-            cmd.arg("--cache_dir").arg(cache);
-            cmd.args(["--already_cached", "BPF"]);
-        }
 
         cmd.arg(fstar_file);
 
@@ -85,19 +73,6 @@ impl FstarRunner {
             Ok(VerifyResult::Fail { message })
         }
     }
-}
-
-const REQUIRED_CHECKED_MODULES: &[&str] = &[
-    "BPF.State", "BPF.Helpers", "BPF.Semantics", "BPF.Spec",
-    "BPF.Verify", "BPF.DefaultSpec",
-    "BPF.Check.StackBounds", "BPF.Check.TypeSafety", "BPF.Check.NullSafety",
-    "BPF.Witness", "BPF.Exec.Safe", "BPF.Tactic", "BPF.Tactic.Layered",
-];
-
-fn cache_complete(cache_dir: &Path) -> bool {
-    REQUIRED_CHECKED_MODULES.iter().all(|m| {
-        cache_dir.join(format!("{m}.fst.checked")).exists()
-    })
 }
 
 /// Try to locate `fstar.exe` on the system PATH using `which`.

@@ -140,7 +140,7 @@ let bpf_auto_map () : Tac unit =
                          "FStar.UInt64"; "FStar.UInt32"; "FStar.UInt8"; "FStar.UInt";
                          "FStar.Int32"; "FStar.Int64"; "FStar.Int";
                          "FStar.Int.Cast"; "FStar.Int.Cast.Full";
-                         "FStar.Mul"; "FStar.List.Tot"];
+                         "FStar.List.Tot"];
         iota; zeta; primops];
   dump "NORMALISED_GOAL";
   extract_counterexample ();

@@ -11,7 +11,6 @@
 *)
 module BPF.AST.Types
 
-open FStar.Mul
 
 (* Integer width *)
 type int_width =

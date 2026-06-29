@@ -16,7 +16,6 @@ module BPF.Integers
 
 open FStar.UInt64
 open FStar.UInt32
-open FStar.Mul
 
 (* Abbreviations for readability *)
 let u64 = FStar.UInt64.t

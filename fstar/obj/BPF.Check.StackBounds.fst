@@ -16,7 +16,6 @@
    cause performance problems on large programmes. *)
 module BPF.Check.StackBounds
 
-open FStar.Mul
 open FStar.Int32
 open BPF.State
 open BPF.Semantics
