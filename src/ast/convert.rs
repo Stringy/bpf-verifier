@@ -119,9 +119,10 @@ pub fn parse_c_type(type_str: &str) -> Result<CType> {
         // Struct types
         s if s.starts_with("struct ") => {
             let struct_name = s.strip_prefix("struct ").unwrap().trim();
+            let fields = context_struct_fields(struct_name);
             Ok(CType::CStruct(StructDef {
                 name: struct_name.to_string(),
-                fields: vec![], // Fields populated elsewhere if needed
+                fields,
             }))
         }
 
@@ -450,6 +451,13 @@ fn convert_expr(node: &Node) -> Result<Expr> {
             }
             let base = convert_expr(&node.inner[0])?;
             let field = node.name.as_deref().unwrap_or("?").to_string();
+            // If the base is a pointer to struct (arrow operator ctx->field),
+            // insert a Deref so the F* AST sees FieldAccess(Deref(ptr), field)
+            // which matches the FieldAccess constructor expecting CStruct, not CPtr.
+            let base = match base_type(&base) {
+                Some(CType::CPtr(_)) => Expr::Deref(Box::new(base)),
+                _ => base,
+            };
             Ok(Expr::FieldAccess(Box::new(base), field))
         }
 
@@ -458,6 +466,20 @@ fn convert_expr(node: &Node) -> Result<Expr> {
             node.kind,
             node.qual_type()
         )),
+    }
+}
+
+/// Get the approximate C type of an expression (for deciding whether
+/// to insert a Deref for arrow-operator field access).
+fn base_type(expr: &Expr) -> Option<CType> {
+    match expr {
+        Expr::VarRef(_, ty) => Some(ty.clone()),
+        Expr::Deref(inner) => match base_type(inner)? {
+            CType::CPtr(inner_ty) => Some(*inner_ty),
+            _ => None,
+        },
+        Expr::Cast(_, ty) => Some(ty.clone()),
+        _ => None,
     }
 }
 
@@ -491,6 +513,41 @@ fn parse_binop(op: &str) -> Result<BinOp> {
         "&&" => Ok(BinOp::LAnd),
         "||" => Ok(BinOp::LOr),
         _ => Err(anyhow!("unrecognised binary operator: '{}'", op)),
+    }
+}
+
+/// Return known fields for BPF context structs.
+///
+/// These must match the definitions in BPF.AST.Decl.prog_ctx_type
+/// exactly — same field names, same types, same order — otherwise
+/// F*'s FieldAccess check (has_field) will reject the access.
+fn context_struct_fields(struct_name: &str) -> Vec<(String, CType)> {
+    match struct_name {
+        "__sk_buff" => vec![
+            ("len".into(), CType::CUInt(IntWidth::W32)),
+            ("protocol".into(), CType::CUInt(IntWidth::W32)),
+            ("data".into(), CType::CUInt(IntWidth::W32)),
+            ("data_end".into(), CType::CUInt(IntWidth::W32)),
+        ],
+        "xdp_md" => vec![
+            ("data".into(), CType::CUInt(IntWidth::W32)),
+            ("data_end".into(), CType::CUInt(IntWidth::W32)),
+            ("data_meta".into(), CType::CUInt(IntWidth::W32)),
+            ("ingress_ifindex".into(), CType::CUInt(IntWidth::W32)),
+            ("rx_queue_index".into(), CType::CUInt(IntWidth::W32)),
+        ],
+        "pt_regs" => vec![
+            ("di".into(), CType::CUInt(IntWidth::W64)),
+            ("si".into(), CType::CUInt(IntWidth::W64)),
+            ("dx".into(), CType::CUInt(IntWidth::W64)),
+            ("cx".into(), CType::CUInt(IntWidth::W64)),
+            ("r8".into(), CType::CUInt(IntWidth::W64)),
+            ("r9".into(), CType::CUInt(IntWidth::W64)),
+            ("ax".into(), CType::CUInt(IntWidth::W64)),
+            ("sp".into(), CType::CUInt(IntWidth::W64)),
+            ("ip".into(), CType::CUInt(IntWidth::W64)),
+        ],
+        _ => vec![], // Unknown struct — no field validation
     }
 }
 

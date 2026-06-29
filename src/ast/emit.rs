@@ -398,7 +398,16 @@ fn emit_ctype(ty: &CType) -> String {
         CType::CVoid => "CVoid".to_string(),
         CType::CPtr(inner) => format!("(CPtr {})", emit_ctype(inner)),
         CType::CPtrOrNull(inner) => format!("(CPtr_or_null {})", emit_ctype(inner)),
-        CType::CStruct(sd) => format!("(CStruct {{ struct_name = \"{}\"; fields = [] }})", sd.name),
+        CType::CStruct(sd) => {
+            if sd.fields.is_empty() {
+                format!("(CStruct {{ struct_name = \"{}\"; fields = [] }})", sd.name)
+            } else {
+                let fields: Vec<String> = sd.fields.iter()
+                    .map(|(name, ty)| format!("(\"{}\", {})", name, emit_ctype(ty)))
+                    .collect();
+                format!("(CStruct {{ struct_name = \"{}\"; fields = [{}] }})", sd.name, fields.join("; "))
+            }
+        }
         CType::CArray(elem, n) => format!("(CArray {} {})", emit_ctype(elem), n),
     }
 }
