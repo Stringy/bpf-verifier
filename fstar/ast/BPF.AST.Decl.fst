@@ -98,7 +98,7 @@ type bpf_prog = {
   prog_name : string;
   prog_type : bpf_prog_type;
   prog_maps : list map_def;
-  prog_body : stmt (initial_ctx prog_type) [];
+  prog_body : stmt prog_type (initial_ctx prog_type) [];
 }
 
 (* The initial variable context for a programme: just "ctx" as PtrToCtx *)

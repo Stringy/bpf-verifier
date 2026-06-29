@@ -50,13 +50,17 @@ let _ : squash (BPF.VarCtx.is_readable ctx2 "pid") = ()  (* assigned *)
 
 (* --- Step 2: Build the programme body --- *)
 
+(* Programme type for this test *)
+let pt = ProgSocketFilter
+
 (* Declare pid variable *)
-let s_declare_pid : stmt ctx0 ctx1 = Declare "pid" c_u64
+let s_declare_pid : stmt pt ctx0 ctx1 = Declare "pid" c_u64
 
 (* Assign pid = bpf_get_current_pid_tgid()
-   This is modelled as CallAssign: call a helper and assign the result. *)
-let s_assign_pid : stmt ctx1 ctx2 =
-  CallAssign "pid" h_get_current_pid_tgid [] scalar_unknown
+   This is modelled as CallAssign: call a helper and assign the result.
+   h_get_current_pid_tgid is AvailUniversal, so the availability proof is (). *)
+let s_assign_pid : stmt pt ctx1 ctx2 =
+  CallAssign "pid" h_get_current_pid_tgid [] () scalar_unknown
 
 (* Return 0: the simple case *)
 let ctx_exit : var_ctx = []
@@ -65,11 +69,11 @@ let ctx_exit : var_ctx = []
 let refs_released_ctx2 : squash (all_refs_released ctx2) = ()
 
 (* Return statement: return 0 *)
-let s_return : stmt ctx2 ctx_exit =
-  Return #ctx2 (IntLit #ctx2 0 W32) refs_released_ctx2
+let s_return : stmt pt ctx2 ctx_exit =
+  Return #pt #ctx2 (IntLit #ctx2 0 W32) refs_released_ctx2
 
 (* Sequence everything: declare; assign; return *)
-let s_body : stmt ctx0 ctx_exit =
+let s_body : stmt pt ctx0 ctx_exit =
   Seq s_declare_pid (Seq s_assign_pid s_return)
 
 (* --- Step 3: Wrap as a bpf_prog --- *)

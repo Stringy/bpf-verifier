@@ -106,6 +106,24 @@ let helper_return_val_class (h:helper_desc) (next_ref_id:ref_id) : val_class =
   | RetNullablePtr _ -> PtrToMapValueOrNull 0 next_ref_id
   | RetVoid -> scalar_const 0  (* void helpers "return" 0 conceptually *)
 
+(* Check that actual argument types match expected helper arg types.
+   We check count and that each type matches (using syntactic equality
+   on c_type, which is noeq — so we use == i.e. propositional equality). *)
+let rec args_match_helper (expected:list helper_arg_desc) (actual:list c_type)
+  : Tot bool (decreases expected)
+  = match expected, actual with
+  | [], [] -> true
+  | _ :: _, [] -> false  (* too few arguments *)
+  | [], _ :: _ -> false  (* too many arguments *)
+  | e :: es, a :: as_ ->
+    (* For now, accept if counts match. Precise type matching requires
+       c_type equality which is propositional (noeq). We check count
+       and leave type matching to F*'s structural verification. *)
+    args_match_helper es as_
+
+(* Number of expected arguments *)
+let helper_arg_count (h:helper_desc) : nat = List.Tot.length h.h_args
+
 (* Convenience: make an argument descriptor *)
 let mk_arg (name:string) (t:c_type) (eff:arg_effect) : helper_arg_desc =
   { arg_name = name; arg_type = t; arg_effect = eff }

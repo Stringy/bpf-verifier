@@ -72,5 +72,12 @@ let _ : squash (not (all_refs_released ctx_with_ref)) = ()
 (* Attempting to return without releasing the socket should fail.
    Return requires squash (all_refs_released ctx). *)
 [@@expect_failure]
-let bad_return_with_ref : stmt ctx_with_ref [] =
-  Return #ctx_with_ref (IntLit #ctx_with_ref 0 W32) ()
+let bad_return_with_ref : stmt ProgSocketFilter ctx_with_ref [] =
+  Return #ProgSocketFilter #ctx_with_ref (IntLit #ctx_with_ref 0 W32) ()
+
+(* --- Test 5: Calling a helper unavailable for the programme type --- *)
+
+(* bpf_xdp_adjust_head is XDP-only. Calling it from a socket filter should fail. *)
+[@@expect_failure]
+let bad_helper_availability : stmt ProgSocketFilter [("ctx", PtrToCtx 0)] _ =
+  CallAssign "r" h_xdp_adjust_head [] () scalar_unknown

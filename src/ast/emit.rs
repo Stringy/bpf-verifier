@@ -53,10 +53,17 @@ fn emit_prog(out: &mut String, prog: &BpfProg) {
     writeln!(out, "(* Programme: {} SEC(\"{}\") *)", prog.name, prog.section).unwrap();
     writeln!(out).unwrap();
 
+    // Map section name to F* programme type constructor
+    let fstar_prog_type = section_to_prog_type(&prog.section);
+
     // The programme body is a single stmt constructed from the C function body.
-    // The initial context has "ctx" as PtrToCtx 0.
-    // Annotate with initial context so F* can infer the chain
-    writeln!(out, "let body_{} : stmt [(\"ctx\", PtrToCtx 0)] _ =", prog.name).unwrap();
+    // Annotate with programme type and initial context so F* can infer the chain.
+    writeln!(
+        out,
+        "let body_{} : stmt {} [(\"ctx\", PtrToCtx 0)] _ =",
+        prog.name, fstar_prog_type
+    )
+    .unwrap();
     emit_stmts(out, &prog.body, 2);
     writeln!(out).unwrap();
 }
@@ -104,7 +111,7 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize) {
                                 if i > 0 { write!(out, "; ").unwrap(); }
                                 emit_ctype_of_expr(out, arg);
                             }
-                            write!(out, "] ").unwrap();
+                            write!(out, "] () ").unwrap(); // () = availability proof
                             emit_val_class_for_helper(out, func_name);
                             write!(out, ")").unwrap();
                         }
@@ -185,7 +192,7 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize) {
                         if i > 0 { write!(out, "; ").unwrap(); }
                         emit_ctype_of_expr(out, arg);
                     }
-                    write!(out, "] scalar_unknown").unwrap();
+                    write!(out, "] () scalar_unknown").unwrap(); // () = availability proof
                 }
                 _ => {
                     // Non-call expression statement: wrap as Nop (expression has no
@@ -350,6 +357,36 @@ fn emit_ctype_of_expr(out: &mut String, expr: &Expr) {
         Expr::IntLit(_, w) => write!(out, "(CInt {})", w).unwrap(),
         Expr::UIntLit(_, w) => write!(out, "(CUInt {})", w).unwrap(),
         _ => write!(out, "CVoid").unwrap(),
+    }
+}
+
+/// Map a BPF SEC() section name to the F* programme type constructor.
+fn section_to_prog_type(section: &str) -> &'static str {
+    match section {
+        "socket_filter" | "socket" => "ProgSocketFilter",
+        "xdp" => "ProgXDP",
+        "kprobe" | "kretprobe" => "ProgKprobe",
+        "tracepoint" | "tp" => "ProgTracepoint",
+        "perf_event" => "ProgPerfEvent",
+        "cgroup/skb" | "cgroup_skb" => "ProgCgroupSkb",
+        "cgroup/sock" | "cgroup_sock" => "ProgCgroupSock",
+        "lwt_in" => "ProgLwtIn",
+        "lwt_out" => "ProgLwtOut",
+        "lwt_xmit" => "ProgLwtXmit",
+        "tc" | "classifier" | "sched_cls" => "ProgSchedCls",
+        "action" | "sched_act" => "ProgSchedAct",
+        "raw_tracepoint" | "raw_tp" => "ProgRawTracepoint",
+        "flow_dissector" => "ProgFlowDissector",
+        // SEC names can have suffixes like "kprobe/sys_open"
+        s if s.starts_with("kprobe/") || s.starts_with("kretprobe/") => "ProgKprobe",
+        s if s.starts_with("tracepoint/") || s.starts_with("tp/") => "ProgTracepoint",
+        s if s.starts_with("raw_tracepoint/") || s.starts_with("raw_tp/") => "ProgRawTracepoint",
+        s if s.starts_with("xdp") => "ProgXDP",
+        s if s.starts_with("lsm/") => "ProgSocketFilter", // TODO: add ProgLSM
+        s if s.starts_with("fentry/") || s.starts_with("fexit/") => "ProgSocketFilter", // TODO
+        s if s.starts_with("cgroup/") => "ProgCgroupSkb",
+        s if s.starts_with("tc") || s.starts_with("classifier") => "ProgSchedCls",
+        _ => "ProgSocketFilter", // conservative default
     }
 }
 
