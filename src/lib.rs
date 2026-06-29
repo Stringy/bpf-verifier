@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod ast;
 pub mod bpf;
 pub mod elf;
 pub mod codegen;
