@@ -81,3 +81,29 @@ let bad_return_with_ref : stmt ProgSocketFilter ctx_with_ref [] =
 [@@expect_failure]
 let bad_helper_availability : stmt ProgSocketFilter [("ctx", PtrToCtx 0)] _ =
   CallAssign "r" h_xdp_adjust_head [] () scalar_unknown
+
+(* --- Test 6: Pointer arithmetic on a forbidden type --- *)
+
+(* PtrToPacketEnd does not allow arithmetic. PtrAdd requires
+   allows_arithmetic to hold for the pointer variable's val_class. *)
+let ctx_with_pkt_end : var_ctx =
+  [("pkt_end", PtrToPacketEnd); ("ctx", PtrToCtx 0)]
+
+[@@expect_failure]
+let bad_ptr_arith_pkt_end : expr ctx_with_pkt_end (CPtr (CUInt W8)) =
+  PtrAdd "pkt_end" () () (UIntLit #ctx_with_pkt_end 1 W64)
+
+(* PtrToMapValueOrNull does not allow arithmetic either. *)
+let ctx_with_nullable : var_ctx =
+  [("val", PtrToMapValueOrNull 0 0); ("ctx", PtrToCtx 0)]
+
+[@@expect_failure]
+let bad_ptr_arith_nullable : expr ctx_with_nullable (CPtr (CUInt W8)) =
+  PtrAdd "val" () () (UIntLit #ctx_with_nullable 1 W64)
+
+(* But PtrToMapValue (after null check) DOES allow arithmetic — positive test *)
+let ctx_with_map_val : var_ctx =
+  [("val", PtrToMapValue 0 0); ("ctx", PtrToCtx 0)]
+
+let ok_ptr_arith_map_val : expr ctx_with_map_val (CPtr (CUInt W8)) =
+  PtrAdd "val" () () (UIntLit #ctx_with_map_val 1 W64)

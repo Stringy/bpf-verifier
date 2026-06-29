@@ -207,6 +207,31 @@ type expr : var_ctx -> c_type -> Type =
                  idx:expr ctx (CUInt W64) ->
                  expr ctx elem_t
 
+  (* Pointer arithmetic: ptr + offset or ptr - offset.
+     Separate from BinOp because:
+     - The result type is CPtr t (not an integer)
+     - The pointer variable's val_class must allow arithmetic
+       (rejects PtrToPacketEnd, PtrToMapValueOrNull, etc.)
+     The pointer is identified by variable name so we can check
+     allows_arithmetic in the var_ctx. *)
+  | PtrAdd : #ctx:var_ctx ->
+             #t:c_type ->
+             ptr_var:var_name ->
+             squash (BPF.VarCtx.is_readable ctx ptr_var) ->
+             squash (is_declared ctx ptr_var /\
+                     allows_arithmetic (get_class ctx ptr_var)) ->
+             offset:expr ctx (CUInt W64) ->
+             expr ctx (CPtr t)
+
+  | PtrSub : #ctx:var_ctx ->
+             #t:c_type ->
+             ptr_var:var_name ->
+             squash (BPF.VarCtx.is_readable ctx ptr_var) ->
+             squash (is_declared ctx ptr_var /\
+                     allows_arithmetic (get_class ctx ptr_var)) ->
+             offset:expr ctx (CUInt W64) ->
+             expr ctx (CPtr t)
+
   (* Sizeof expression: returns the size of a type as a constant *)
   | SizeOf : #ctx:var_ctx ->
              t:c_type ->
