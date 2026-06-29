@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 
 use bpf_verifier::analysis::{dataflow, stack_bounds};
+use bpf_verifier::ast;
 use bpf_verifier::codegen::fstar::{generate_fstar, generate_fields_module};
 use bpf_verifier::elf::parser::{parse_elf, BpfProgram, StructDef};
 use bpf_verifier::kverify;
@@ -12,7 +13,7 @@ use bpf_verifier::verify::runner::{FstarRunner, VerifyResult};
 
 #[derive(Parser)]
 #[command(name = "bpf-verifier")]
-#[command(about = "Formally verify BPF programs against F*/Pulse specifications")]
+#[command(about = "Formally verify BPF programmes")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -20,6 +21,21 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Commands {
+    /// Object-level verification (operates on compiled .bpf.o files)
+    Object {
+        #[command(subcommand)]
+        command: ObjectCommands,
+    },
+    /// AST-level verification (operates on C source files)
+    Ast {
+        #[command(subcommand)]
+        command: AstCommands,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum ObjectCommands {
+    /// Verify a BPF object against an F* spec
     Verify {
         #[arg(help = "Path to BPF object file")]
         program: PathBuf,
@@ -36,6 +52,18 @@ enum Commands {
         #[arg(long, help = "Path to F* binary (overrides auto-detection)")]
         fstar_path: Option<PathBuf>,
     },
+    /// Check a BPF object for safety (kernel-verifier-style, no root required)
+    Check {
+        #[arg(help = "Path to BPF object file")]
+        program: PathBuf,
+
+        #[arg(long, help = "Only check these sections, repeatable")]
+        section: Vec<String>,
+
+        #[arg(long, help = "Show detailed verification state")]
+        verbose: bool,
+    },
+    /// Generate F* verification module from a BPF object (without running F*)
     Codegen {
         #[arg(help = "Path to BPF object file")]
         program: PathBuf,
@@ -46,16 +74,34 @@ enum Commands {
         #[arg(long, help = "Path to F* spec file")]
         spec: Option<PathBuf>,
     },
-    /// Check a BPF programme for safety (kernel-verifier-style, no root required)
-    Check {
-        #[arg(help = "Path to BPF object file")]
-        program: PathBuf,
+}
 
-        #[arg(long, help = "Only check these sections, repeatable")]
-        section: Vec<String>,
+#[derive(clap::Subcommand)]
+enum AstCommands {
+    /// Verify a BPF C source file at the AST level
+    Verify {
+        #[arg(help = "Path to BPF C source file")]
+        source: PathBuf,
 
-        #[arg(long, help = "Show detailed verification state")]
+        #[arg(long, short, help = "Output F* module path (default: stdout)")]
+        output: Option<PathBuf>,
+
+        #[arg(long, help = "F* module name (derived from output if not given)")]
+        module_name: Option<String>,
+
+        #[arg(long, help = "Show generated F* source")]
         verbose: bool,
+    },
+    /// Generate F* AST module from a BPF C source file (without running F*)
+    Codegen {
+        #[arg(help = "Path to BPF C source file")]
+        source: PathBuf,
+
+        #[arg(long, short, help = "Output F* module path (default: stdout)")]
+        output: Option<PathBuf>,
+
+        #[arg(long, help = "F* module name (derived from output if not given)")]
+        module_name: Option<String>,
     },
 }
 
@@ -131,44 +177,68 @@ fn parse_spec_args(specs: &[String]) -> Result<HashMap<String, PathBuf>, String>
 
 fn main() {
     let cli = Cli::parse();
-    match cli.command {
-        Commands::Verify {
-            program,
-            spec,
-            section,
-            verbose,
-            fstar_path,
-        } => {
-            let spec_map = match parse_spec_args(&spec) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    std::process::exit(2);
-                }
-            };
-            std::process::exit(run_verify(
-                &program,
-                &spec_map,
-                &section,
+    let exit_code = match cli.command {
+        Commands::Object { command } => match command {
+            ObjectCommands::Verify {
+                program,
+                spec,
+                section,
                 verbose,
-                fstar_path.as_deref(),
-            ));
-        }
-        Commands::Codegen {
-            program,
-            section,
-            spec,
-        } => {
-            std::process::exit(run_codegen(&program, section.as_deref(), spec.as_deref()));
-        }
-        Commands::Check {
-            program,
-            section,
-            verbose,
-        } => {
-            std::process::exit(run_check(&program, &section, verbose));
-        }
-    }
+                fstar_path,
+            } => {
+                let spec_map = match parse_spec_args(&spec) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(2);
+                    }
+                };
+                run_verify(
+                    &program,
+                    &spec_map,
+                    &section,
+                    verbose,
+                    fstar_path.as_deref(),
+                )
+            }
+            ObjectCommands::Check {
+                program,
+                section,
+                verbose,
+            } => run_check(&program, &section, verbose),
+            ObjectCommands::Codegen {
+                program,
+                section,
+                spec,
+            } => run_codegen(&program, section.as_deref(), spec.as_deref()),
+        },
+        Commands::Ast { command } => match command {
+            AstCommands::Verify {
+                source,
+                output,
+                module_name,
+                verbose,
+            } => run_ast_verify(
+                &source,
+                output.as_deref(),
+                module_name.as_deref(),
+                true,
+                verbose,
+            ),
+            AstCommands::Codegen {
+                source,
+                output,
+                module_name,
+            } => run_ast_verify(
+                &source,
+                output.as_deref(),
+                module_name.as_deref(),
+                false,
+                false,
+            ),
+        },
+    };
+    std::process::exit(exit_code);
 }
 
 fn run_codegen(
@@ -364,8 +434,8 @@ fn verify_program(
             .map_err(|e| format!("failed to copy spec file {}: {e}", path.display()))?;
     }
 
-    let include_dirs = vec![project_root.join("fstar"), tmp_dir.path().to_path_buf()];
-    let cache_dir = project_root.join("fstar/.cache");
+    let include_dirs = vec![project_root.join("fstar/obj"), tmp_dir.path().to_path_buf()];
+    let cache_dir = project_root.join("fstar/obj/.cache");
     let runner = if let Some(override_path) = fstar_path_override {
         FstarRunner::new(override_path.to_path_buf(), include_dirs)
     } else {
@@ -517,4 +587,160 @@ fn run_check(
     }
 
     if failed > 0 { 1 } else { 0 }
+}
+
+fn run_ast_verify(
+    source_path: &Path,
+    output: Option<&Path>,
+    module_name: Option<&str>,
+    run_fstar: bool,
+    verbose: bool,
+) -> i32 {
+    use std::process::Command;
+
+    // Step 1: Run clang to get JSON AST
+    let clang_output = Command::new("clang")
+        .args([
+            "-target", "bpf",
+            "-Xclang", "-ast-dump=json",
+            "-fsyntax-only",
+        ])
+        .arg(source_path)
+        .output();
+
+    let clang_output = match clang_output {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            eprintln!(
+                "error: clang failed:\n{}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("error: failed to run clang: {e}");
+            return 2;
+        }
+    };
+
+    // Step 2: Parse Clang JSON AST
+    let root: ast::clang_ast::Node = match serde_json::from_slice(&clang_output.stdout) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("error: failed to parse Clang JSON AST: {e}");
+            return 2;
+        }
+    };
+
+    // Step 3: Convert to our AST
+    let source_name = source_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+
+    let bpf_obj = match ast::convert::convert_translation_unit(&root, source_name) {
+        Ok(obj) => obj,
+        Err(e) => {
+            eprintln!("error: AST conversion failed: {e}");
+            return 2;
+        }
+    };
+
+    eprintln!(
+        "Converted {} ({} maps, {} progs)",
+        source_name,
+        bpf_obj.maps.len(),
+        bpf_obj.progs.len()
+    );
+
+    // Step 4: Emit F* source
+    let mod_name = module_name.unwrap_or_else(|| {
+        output
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .unwrap_or("BPF.Generated")
+    });
+
+    let fstar_source = ast::emit::emit_module(&bpf_obj, mod_name);
+
+    if verbose {
+        eprintln!("--- Generated F* ---");
+        eprintln!("{fstar_source}");
+        eprintln!("--- End ---");
+    }
+
+    // Step 5: Write output or verify
+    if !run_fstar {
+        if let Some(out) = output {
+            if let Err(e) = std::fs::write(out, &fstar_source) {
+                eprintln!("error: failed to write {}: {e}", out.display());
+                return 2;
+            }
+            eprintln!("Wrote {}", out.display());
+        } else {
+            print!("{fstar_source}");
+        }
+        return 0;
+    }
+
+    // Step 6: Write to temp file and run F* verification.
+    // F* requires the module name to match the filename, so we use the
+    // module name to construct the temp file path.
+    let tmp_dir = match tempfile::TempDir::new() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("error: failed to create temp dir: {e}");
+            return 2;
+        }
+    };
+    let fst_filename = format!("{}.fst", mod_name.replace('.', "."));
+    let fst_path = tmp_dir.path().join(&fst_filename);
+    if let Err(e) = std::fs::write(&fst_path, &fstar_source) {
+        eprintln!("error: failed to write {}: {e}", fst_path.display());
+        return 2;
+    }
+
+    let root = project_root();
+    let ast_fstar_dir = root.join("fstar/ast");
+    let cache_dir = ast_fstar_dir.join("_cache");
+    std::fs::create_dir_all(&cache_dir).ok();
+
+    eprintln!("Verifying {}...", source_name);
+
+    let fstar_result = Command::new("fstar.exe")
+        .args([
+            "--include", &ast_fstar_dir.to_string_lossy(),
+            "--cache_checked_modules",
+            "--cache_dir", &cache_dir.to_string_lossy(),
+        ])
+        .arg(&fst_path)
+        .output();
+
+    match fstar_result {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if stdout.contains("All verification conditions discharged") {
+                println!("OK: AST verification passed for {}", source_name);
+            } else {
+                println!("OK: {}", stdout.trim());
+            }
+            0
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            eprintln!("FAIL: AST verification failed for {}", source_name);
+            if !stdout.is_empty() {
+                eprintln!("{stdout}");
+            }
+            if !stderr.is_empty() {
+                eprintln!("{stderr}");
+            }
+            1
+        }
+        Err(e) => {
+            eprintln!("error: failed to run fstar.exe: {e}");
+            2
+        }
+    }
 }

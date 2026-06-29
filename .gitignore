@@ -1,6 +1,8 @@
 /target
 /.superpowers
 /fstar/.cache
+/fstar/obj/.cache
+/fstar/ast/_cache
 /docs/superpowers
 *.bpf.o
 /scratch/
