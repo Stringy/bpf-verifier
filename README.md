@@ -24,7 +24,7 @@ Verify your own programme (mount the current directory into the container):
 
 ```
 docker run --rm -v $(pwd):/workspace bpf-verifier \
-  cargo run -- verify my_prog.bpf.o --spec "tp/raw_syscalls/sys_enter:MySpec.fst"
+  cargo run -- object verify my_prog.bpf.o --spec "tp/raw_syscalls/sys_enter:MySpec.fst"
 ```
 
 Interactive shell:
@@ -50,28 +50,40 @@ make test
 
 ## Usage
 
-### Verify a programme against a spec
+The tool has two verification modes: **object-level** (operates on compiled `.bpf.o` files) and **AST-level** (operates on C source).
+
+### Object-level verification
+
+#### Verify a programme against a spec
 
 ```
-cargo run -- verify prog.bpf.o --spec "section_name:Spec.fst"
+bpf-verifier object verify prog.bpf.o --spec "section_name:Spec.fst"
 ```
 
 The `--spec` argument pairs a programme section with a spec file. The section name is the ELF section containing the BPF programme (e.g. `tp/raw_syscalls/sys_enter`, `test`, `xdp`).
 
-### Crash-safety only (no spec)
+#### Crash-safety only (no spec)
 
 Without `--spec`, the verifier checks that the programme can't crash — no null dereferences, no out-of-bounds stack access, no type confusion:
 
 ```
-cargo run -- verify prog.bpf.o
+bpf-verifier object verify prog.bpf.o
 ```
 
-### Multiple sections
+#### Safety check (pure Rust, no F\*)
+
+The `check` subcommand runs a kernel-verifier-style abstract interpretation entirely in Rust — no F\* or Z3 required:
+
+```
+bpf-verifier object check prog.bpf.o
+```
+
+#### Multiple sections
 
 BPF objects can contain multiple programme sections. Pair different specs with different sections:
 
 ```
-cargo run -- verify prog.bpf.o \
+bpf-verifier object verify prog.bpf.o \
   --spec "tp/raw_syscalls/sys_enter:EnterSpec.fst" \
   --spec "tp/raw_syscalls/sys_exit:ExitSpec.fst"
 ```
@@ -79,15 +91,57 @@ cargo run -- verify prog.bpf.o \
 Or verify a single section:
 
 ```
-cargo run -- verify prog.bpf.o --section tp/raw_syscalls/sys_enter
+bpf-verifier object verify prog.bpf.o --section tp/raw_syscalls/sys_enter
 ```
 
-### Inspect generated F\*
+#### Inspect generated F\*
 
 Dump the verification module without running F\*:
 
 ```
-cargo run -- codegen prog.bpf.o
+bpf-verifier object codegen prog.bpf.o
+```
+
+### AST-level verification
+
+AST-level verification works on C source rather than compiled objects. It uses Clang's JSON AST dump to parse the programme, converts it to F\* AST constructor applications, and verifies the result with F\*.
+
+#### Simple programmes
+
+For programmes with no special include paths or defines:
+
+```
+bpf-verifier ast verify prog.bpf.c
+bpf-verifier ast codegen prog.bpf.c
+```
+
+#### Real-world programmes (compile_commands.json)
+
+Real BPF programmes need specific clang flags — include paths for libbpf headers, architecture defines, project-local headers. If your build system generates a `compile_commands.json` (CMake does this with `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`; for other build systems use [Bear](https://github.com/rizsotto/Bear)), you can point at it:
+
+```
+bpf-verifier ast verify src/bpf/main.c \
+  --compile-commands build/compile_commands.json
+```
+
+The tool finds the compile command for your source file and replays it with AST dump flags injected.
+
+#### Pre-generated JSON AST
+
+For full control, generate the Clang JSON AST yourself and pass it in:
+
+```
+clang -target bpf -D__TARGET_ARCH_x86_64 -I include \
+  -Xclang -ast-dump=json -fsyntax-only prog.bpf.c > ast.json
+
+bpf-verifier ast verify prog.bpf.c --ast-json ast.json
+```
+
+This is useful when your build has complex flags, cross-compilation requirements, or when you want to cache the AST. Use `-` to read from stdin:
+
+```
+clang <your flags> -Xclang -ast-dump=json -fsyntax-only prog.bpf.c \
+  | bpf-verifier ast verify prog.bpf.c --ast-json -
 ```
 
 ## Writing specs
@@ -142,17 +196,16 @@ See `tests/corpus/good/` for correct specs and `tests/corpus/bad/` for deliberat
 
 ```
 src/                    Rust — ELF parsing, analysis, codegen, diagnostics
-fstar/                  F* — BPF state model, semantics, proof infrastructure
+fstar/obj/              F* — BPF state model, semantics, proof infrastructure (object-level)
+fstar/ast/              F* — AST types, expression/statement verification (AST-level)
 templates/verify.fst    Askama template for generated verification modules
 tests/corpus/           BPF C programmes + matching F* specs
 include/vmlinux/        Kernel type definitions for BPF compilation
 ```
 
-For a detailed walkthrough of the verification pipeline, see [ARCHITECTURE.md](ARCHITECTURE.md).
-
 ## Compiling BPF programmes
 
-To compile a BPF C programme for verification:
+To compile a BPF C programme for object-level verification:
 
 ```
 clang -target bpf -O2 -g -Wall -Werror \

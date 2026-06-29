@@ -76,12 +76,47 @@ enum ObjectCommands {
     },
 }
 
+/// Common arguments for AST input source.
+///
+/// The AST can be obtained in three ways (checked in this order):
+///
+/// 1. `--ast-json` — a pre-generated Clang JSON AST file (or "-" for stdin).
+///    Use this when your build has complex flags. Generate it with:
+///    `clang <your flags> -Xclang -ast-dump=json -fsyntax-only prog.c > ast.json`
+///
+/// 2. `--compile-commands` — a compile_commands.json compilation database.
+///    The tool finds the entry for your source file and replays the clang
+///    command with AST dump flags injected. CMake generates this with
+///    `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`; for other build systems use Bear.
+///
+/// 3. Neither — runs a bare `clang -target bpf` invocation. Only works for
+///    simple programmes without special include paths or defines.
+#[derive(clap::Args, Clone)]
+struct AstInputArgs {
+    #[arg(help = "Path to BPF C source file")]
+    source: PathBuf,
+
+    #[arg(
+        long,
+        help = "Pre-generated Clang JSON AST file (use \"-\" for stdin). \
+                Generate with: clang <flags> -Xclang -ast-dump=json -fsyntax-only prog.c > ast.json"
+    )]
+    ast_json: Option<PathBuf>,
+
+    #[arg(
+        long,
+        help = "Path to compile_commands.json. The tool replays the recorded \
+                clang command for the source file with AST dump flags injected"
+    )]
+    compile_commands: Option<PathBuf>,
+}
+
 #[derive(clap::Subcommand)]
 enum AstCommands {
     /// Verify a BPF C source file at the AST level
     Verify {
-        #[arg(help = "Path to BPF C source file")]
-        source: PathBuf,
+        #[command(flatten)]
+        input: AstInputArgs,
 
         #[arg(long, short, help = "Output F* module path (default: stdout)")]
         output: Option<PathBuf>,
@@ -94,8 +129,8 @@ enum AstCommands {
     },
     /// Generate F* AST module from a BPF C source file (without running F*)
     Codegen {
-        #[arg(help = "Path to BPF C source file")]
-        source: PathBuf,
+        #[command(flatten)]
+        input: AstInputArgs,
 
         #[arg(long, short, help = "Output F* module path (default: stdout)")]
         output: Option<PathBuf>,
@@ -223,23 +258,23 @@ fn main() {
         },
         Commands::Ast { command } => match command {
             AstCommands::Verify {
-                source,
+                input,
                 output,
                 module_name,
                 verbose,
             } => run_ast_verify(
-                &source,
+                &input,
                 output.as_deref(),
                 module_name.as_deref(),
                 true,
                 verbose,
             ),
             AstCommands::Codegen {
-                source,
+                input,
                 output,
                 module_name,
             } => run_ast_verify(
-                &source,
+                &input,
                 output.as_deref(),
                 module_name.as_deref(),
                 false,
@@ -597,70 +632,61 @@ fn run_check(
 }
 
 fn run_ast_verify(
-    source_path: &Path,
+    input: &AstInputArgs,
     output: Option<&Path>,
     module_name: Option<&str>,
     run_fstar: bool,
     verbose: bool,
 ) -> i32 {
-    use std::process::Command;
+    use ast::load::{self, LoadedAst};
 
-    // Step 1: Run clang to get JSON AST
-    let clang_output = Command::new("clang")
-        .args([
-            "-target", "bpf",
-            "-Xclang", "-ast-dump=json",
-            "-fsyntax-only",
-        ])
-        .arg(source_path)
-        .output();
-
-    let clang_output = match clang_output {
-        Ok(o) if o.status.success() => o,
-        Ok(o) => {
-            eprintln!(
-                "error: clang failed:\n{}",
-                String::from_utf8_lossy(&o.stderr)
-            );
-            return 2;
+    // Step 1: Load the Clang JSON AST via the appropriate method.
+    let loaded: LoadedAst = if let Some(ref json_path) = input.ast_json {
+        let source_name = input.source.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown.c");
+        match load::load_from_json(json_path, source_name) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                return 2;
+            }
         }
-        Err(e) => {
-            eprintln!("error: failed to run clang: {e}");
-            return 2;
+    } else if let Some(ref db_path) = input.compile_commands {
+        match load::load_from_compile_commands(db_path, &input.source) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                return 2;
+            }
         }
-    };
-
-    // Step 2: Parse Clang JSON AST
-    let root: ast::clang_ast::Node = match serde_json::from_slice(&clang_output.stdout) {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("error: failed to parse Clang JSON AST: {e}");
-            return 2;
+    } else {
+        match load::load_from_source(&input.source) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                return 2;
+            }
         }
     };
 
-    // Step 3: Convert to our AST
-    let source_name = source_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-
-    let bpf_obj = match ast::convert::convert_translation_unit(&root, source_name) {
+    // Step 2: Convert to our AST
+    let bpf_obj = match ast::convert::convert_translation_unit(&loaded.root, &loaded.source_name) {
         Ok(obj) => obj,
         Err(e) => {
-            eprintln!("error: AST conversion failed: {e}");
+            eprintln!("error: AST conversion failed: {e:#}");
             return 2;
         }
     };
 
     eprintln!(
         "Converted {} ({} maps, {} progs)",
-        source_name,
+        loaded.source_name,
         bpf_obj.maps.len(),
         bpf_obj.progs.len()
     );
 
-    // Step 4: Emit F* source
+    // Step 3: Emit F* source
     let mod_name = module_name.unwrap_or_else(|| {
         output
             .and_then(|p| p.file_stem())
@@ -676,7 +702,7 @@ fn run_ast_verify(
         eprintln!("--- End ---");
     }
 
-    // Step 5: Write output or verify
+    // Step 4: Write output or verify
     if !run_fstar {
         if let Some(out) = output {
             if let Err(e) = std::fs::write(out, &fstar_source) {
@@ -690,9 +716,7 @@ fn run_ast_verify(
         return 0;
     }
 
-    // Step 6: Write to temp file and run F* verification.
-    // F* requires the module name to match the filename, so we use the
-    // module name to construct the temp file path.
+    // Step 5: Write to temp file and run F* verification.
     let tmp_dir = match tempfile::TempDir::new() {
         Ok(t) => t,
         Err(e) => {
@@ -710,9 +734,9 @@ fn run_ast_verify(
     let root = project_root();
     let ast_fstar_dir = root.join("fstar/ast");
 
-    eprintln!("Verifying {}...", source_name);
+    eprintln!("Verifying {}...", loaded.source_name);
 
-    let fstar_result = Command::new("fstar.exe")
+    let fstar_result = std::process::Command::new("fstar.exe")
         .args([
             "--include", &ast_fstar_dir.to_string_lossy(),
             "--cache_checked_modules",
@@ -724,7 +748,7 @@ fn run_ast_verify(
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout);
             if stdout.contains("All verification conditions discharged") {
-                println!("OK: AST verification passed for {}", source_name);
+                println!("OK: AST verification passed for {}", loaded.source_name);
             } else {
                 println!("OK: {}", stdout.trim());
             }
@@ -733,7 +757,7 @@ fn run_ast_verify(
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
             let stdout = String::from_utf8_lossy(&o.stdout);
-            eprintln!("FAIL: AST verification failed for {}", source_name);
+            eprintln!("FAIL: AST verification failed for {}", loaded.source_name);
             if !stdout.is_empty() {
                 eprintln!("{stdout}");
             }

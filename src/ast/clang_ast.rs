@@ -6,6 +6,61 @@
 
 use serde::Deserialize;
 
+/// Deserialise a JSON value that may be a string or a number into
+/// `Option<String>`. Clang's AST dump emits `value` as a string for
+/// some node kinds (e.g. string literals) and as a bare integer for
+/// others (e.g. integer literals in newer clang versions).
+fn string_or_number<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StringOrNumber;
+
+    impl<'de> de::Visitor<'de> for StringOrNumber {
+        type Value = Option<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string, integer, or null")
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+    }
+
+    deserializer.deserialize_any(StringOrNumber)
+}
+
 /// A node in the Clang AST. Uses a flat structure with optional fields
 /// rather than an enum, because Clang's JSON format is ad-hoc and
 /// many fields are shared across node kinds.
@@ -13,6 +68,7 @@ use serde::Deserialize;
 #[serde(rename_all = "camelCase")]
 pub struct Node {
     pub id: Option<String>,
+    #[serde(default)]
     pub kind: String,
     pub name: Option<String>,
 
@@ -20,6 +76,7 @@ pub struct Node {
     pub ty: Option<QualType>,
 
     pub opcode: Option<String>,
+    #[serde(default, deserialize_with = "string_or_number")]
     pub value: Option<String>,
 
     /// For DeclRefExpr: the referenced declaration
