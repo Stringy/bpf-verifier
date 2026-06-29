@@ -12,7 +12,7 @@ fn parse_invalid_elf_fails() {
         .join("tests/corpus/good/AddRegs.fst");
 
     let output = std::process::Command::new(cargo_bin("bpf-verifier"))
-        .arg("verify")
+        .args(["object", "verify"])
         .arg(tmp.path())
         .arg("--spec")
         .arg(&spec)

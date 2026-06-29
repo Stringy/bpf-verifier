@@ -10,7 +10,7 @@ fn verify_good(spec_path: &Path) -> datatest_stable::Result<()> {
 
     let spec_arg = format!("test:{}", spec_path.display());
     let output = std::process::Command::new(cargo_bin("bpf-verifier"))
-        .arg("verify")
+        .args(["object", "verify"])
         .arg(&obj)
         .arg("--spec")
         .arg(&spec_arg)
@@ -36,7 +36,7 @@ fn verify_bad(spec_path: &Path) -> datatest_stable::Result<()> {
 
     let spec_arg = format!("test:{}", spec_path.display());
     let output = std::process::Command::new(cargo_bin("bpf-verifier"))
-        .arg("verify")
+        .args(["object", "verify"])
         .arg(&obj)
         .arg("--spec")
         .arg(&spec_arg)

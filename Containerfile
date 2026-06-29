@@ -26,14 +26,21 @@ RUN sudo mkdir -p /fstar-dist/bin /fstar-dist/lib \
     && sudo cp -r ulib /fstar-dist/lib/fstar
 
 
-# Stage 2: Build and test the Rust binary.
+# Stage 2: Build and test everything.
 #
-# Needs clang for build.rs (compiles BPF test corpus).
+# Has clang (for build.rs BPF compilation), F* and Z3 (for corpus tests).
+# All Rust tests run here including the corpus integration tests.
 FROM rust:bookworm AS rust-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     clang llvm lld libbpf-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# F* and Z3 from stage 1 so corpus tests can run
+COPY --from=fstar-builder /fstar-dist/bin/fstar.exe /usr/local/bin/
+COPY --from=fstar-builder /fstar-dist/lib/fstar/ /usr/local/lib/fstar/
+COPY --from=fstar-builder /usr/local/bin/z3-* /usr/local/bin/
+ENV FSTAR_HOME=/usr/local/lib/fstar
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock build.rs askama.toml ./
@@ -41,6 +48,12 @@ COPY src/ src/
 COPY templates/ templates/
 COPY tests/ tests/
 COPY include/ include/
+COPY fstar/ fstar/
+COPY Makefile .
+
+# Pre-verify the object-level F* modules so the corpus tests don't
+# have to re-check them on every invocation.
+RUN make check-obj
 
 RUN cargo build --release --bin bpf-verifier
 RUN cargo test --release
@@ -48,8 +61,7 @@ RUN cargo test --release
 
 # Stage 3: Verify F* modules.
 #
-# Runs fstar.exe on both object-level and AST-level modules.
-# This validates the verification infrastructure itself.
+# Validates the AST-level verification infrastructure.
 FROM debian:bookworm-slim AS fstar-check
 
 COPY --from=fstar-builder /fstar-dist/bin/fstar.exe /usr/local/bin/
@@ -66,12 +78,7 @@ RUN make check-ast test-ast
 
 # Stage 4: Minimal runtime image.
 #
-# Contains only what's needed to run bpf-verifier:
-# - The binary
-# - F* and Z3 (for verification)
-# - Clang (for AST mode: C source → JSON AST)
-# - BPF headers (for clang -target bpf)
-# - The F* verification modules
+# Only the binary, F*/Z3, clang, and verified F* modules.
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -79,16 +86,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libbpf-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# F* and Z3
 COPY --from=fstar-builder /fstar-dist/bin/fstar.exe /usr/local/bin/
 COPY --from=fstar-builder /fstar-dist/lib/fstar/ /usr/local/lib/fstar/
 COPY --from=fstar-builder /usr/local/bin/z3-* /usr/local/bin/
 ENV FSTAR_HOME=/usr/local/lib/fstar
 
-# bpf-verifier binary (from the tested build)
 COPY --from=rust-builder /build/target/release/bpf-verifier /usr/local/bin/
-
-# F* verification modules (validated by fstar-check stage)
 COPY --from=fstar-check /check/fstar/ /usr/local/share/bpf-verifier/fstar/
 
 WORKDIR /work
