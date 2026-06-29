@@ -14,6 +14,7 @@
 *)
 module BPF.VarCtx
 
+open BPF.AST.Types
 open BPF.ValClass
 
 (* Variable name *)
@@ -53,6 +54,12 @@ let is_readable (ctx:var_ctx) (name:var_name) : bool =
 (* Get the classification of a variable known to be declared *)
 let get_class (ctx:var_ctx) (name:var_name{is_declared ctx name}) : val_class =
   Some?.v (lookup ctx name)
+
+(* Is a variable's val_class compatible with a given c_type? *)
+let var_type_compatible (ctx:var_ctx) (name:var_name) (t:c_type) : bool =
+  match lookup ctx name with
+  | Some vc -> val_class_compatible vc t
+  | None -> false
 
 (* --- Modification --- *)
 

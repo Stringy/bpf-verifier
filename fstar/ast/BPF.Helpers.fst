@@ -231,18 +231,25 @@ let h_get_prandom_u32 : helper_desc = {
   h_availability = AvailUniversal;
 }
 
-(* bpf_probe_read_kernel: read from kernel memory *)
+(* bpf_probe_read_kernel: read from kernel memory.
+   Available in tracing types and some networking types, NOT universal.
+   Kernel restricts via bpf_base_func_proto. *)
+let probe_read_types : list bpf_prog_type =
+  [ProgKprobe; ProgTracepoint; ProgRawTracepoint;
+   ProgPerfEvent; ProgSchedCls; ProgSchedAct;
+   ProgSocketFilter; ProgXDP]
+
 let h_probe_read_kernel : helper_desc = {
   h_name = "bpf_probe_read_kernel";
   h_args = [ mk_arg "dst" (CPtr CVoid) ArgOut;
              mk_arg "size" c_u32 ArgIn;
-             mk_arg "src" c_u64 ArgIn ];  (* kernel address as u64 *)
+             mk_arg "src" c_u64 ArgIn ];
   h_return = RetScalar (CInt W32);
   h_ref_effect = NoRef;
-  h_availability = AvailUniversal;
+  h_availability = AvailTypes probe_read_types;
 }
 
-(* bpf_probe_read_user: read from user memory *)
+(* bpf_probe_read_user: read from user memory. Same availability. *)
 let h_probe_read_user : helper_desc = {
   h_name = "bpf_probe_read_user";
   h_args = [ mk_arg "dst" (CPtr CVoid) ArgOut;
@@ -250,7 +257,7 @@ let h_probe_read_user : helper_desc = {
              mk_arg "src" c_u64 ArgIn ];
   h_return = RetScalar (CInt W32);
   h_ref_effect = NoRef;
-  h_availability = AvailUniversal;
+  h_availability = AvailTypes probe_read_types;
 }
 
 (* bpf_trace_printk: debug printing *)
@@ -460,7 +467,7 @@ let h_csum_diff : helper_desc = {
              mk_arg "to" (CPtr c_u32) ArgIn;
              mk_arg "to_size" c_u32 ArgIn;
              mk_arg "seed" c_u32 ArgIn ];
-  h_return = RetScalar (CInt W64);
+  h_return = RetScalar (CInt W32);
   h_ref_effect = NoRef;
   h_availability = AvailTypes xdp_tc_types;
 }

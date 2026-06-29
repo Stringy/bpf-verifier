@@ -14,6 +14,7 @@ module BPF.ValClass
 
 open BPF.Tnum
 open BPF.Range
+open BPF.AST.Types
 
 (* Unique identifier for a map definition *)
 type map_id = nat
@@ -87,6 +88,27 @@ type val_class =
 
   (* Socket lookup result, not yet null-checked. *)
   | PtrToSocketOrNull : rid:ref_id -> val_class
+
+(* --- Type compatibility --- *)
+
+(* A val_class is compatible with a c_type if they describe the same
+   kind of value. Scalars are compatible with any integer type.
+   Pointer classifications are compatible with CPtr or CPtr_or_null.
+   This is used to enforce that VarRef produces the correct type and
+   that Assign uses a val_class consistent with the expression type. *)
+let val_class_compatible (vc:val_class) (t:c_type) : bool =
+  match vc, t with
+  | Uninit, _ -> false
+  | Scalar _ _, CInt _ | Scalar _ _, CUInt _ | Scalar _ _, CBool -> true
+  | PtrToCtx _, CPtr _ -> true
+  | PtrToLocal _ _, CPtr _ -> true
+  | PtrToMapValue _ _, CPtr _ -> true
+  | PtrToMapValueOrNull _ _, CPtr_or_null _ -> true
+  | PtrToPacket _, CPtr _ -> true
+  | PtrToPacketEnd, CPtr _ -> true  (* end marker is still a pointer *)
+  | PtrToSocket _, CPtr _ -> true
+  | PtrToSocketOrNull _, CPtr_or_null _ -> true
+  | _, _ -> false
 
 (* --- Classification queries --- *)
 

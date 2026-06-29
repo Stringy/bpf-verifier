@@ -19,20 +19,20 @@ let map_my_map : map_def = {
 
 (* Programme: my_filter SEC("socket_filter") *)
 
-let body_my_filter : stmt [("ctx", PtrToCtx 0)] _ =
+let body_my_filter : stmt ProgSocketFilter [("ctx", PtrToCtx 0)] _ =
   Seq (
     Seq (Declare "key" (CUInt W32))
         (Assign "key" (IntLit (0) W32) scalar_unknown))
   (
     Seq (
       Seq (Declare "val" (CPtr (CUInt W64)))
-          (CallAssign "val" h_map_lookup_elem [(CPtr (CStruct { struct_name = "(unnamed struct at testdata/simple_filter.c:13:1)"; fields = [] })); (CPtr (CUInt W32))] (PtrToMapValueOrNull 0 0)))
+          (CallAssign "val" h_map_lookup_elem [(CPtr (CStruct { struct_name = "(unnamed struct at testdata/simple_filter.c:13:1)"; fields = [] })); (CPtr (CUInt W32))] () (PtrToMapValueOrNull 0 0)))
     (
       Seq (
         IfNull "val" () () () ()
           (
             If (
-BinOp Gt (Deref (VarRef "val" (CPtr (CUInt W64)) ())) (IntLit (100) W32) ())
+BinOp Gt (Deref (VarRef "val" (CPtr (CUInt W64)) () ())) (IntLit (100) W32) ())
               (Return (
 IntLit (1) W32) ())
               (Return (

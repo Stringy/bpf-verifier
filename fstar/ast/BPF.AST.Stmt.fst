@@ -47,13 +47,14 @@ type stmt : bpf_prog_type -> var_ctx -> var_ctx -> Type =
 
   (* Assignment: evaluate expression, update variable's classification.
      The expression is well-typed in the current context. The variable's
-     classification in the output context reflects the assigned value. *)
+     classification in the output context reflects the assigned value.
+     The val_class must be compatible with the expression's type. *)
   | Assign : #pt:bpf_prog_type ->
              #ctx:var_ctx ->
              #t:c_type ->
              name:var_name ->
              value:expr ctx t ->
-             vc:val_class{BPF.ValClass.is_readable vc} ->
+             vc:val_class{BPF.ValClass.is_readable vc && val_class_compatible vc t} ->
              stmt pt ctx (assign ctx name vc)
 
   (* Sequential composition: thread the context through two statements *)

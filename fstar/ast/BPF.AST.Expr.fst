@@ -141,11 +141,13 @@ type expr : var_ctx -> c_type -> Type =
               v:bool ->
               expr ctx CBool
 
-  (* Variable reference: the variable must be in context and readable *)
+  (* Variable reference: the variable must be in context, readable,
+     and the claimed type must be compatible with its val_class *)
   | VarRef : #ctx:var_ctx ->
              name:var_name ->
              t:c_type ->
              squash (BPF.VarCtx.is_readable ctx name) ->
+             squash (BPF.VarCtx.var_type_compatible ctx name t) ->
              expr ctx t
 
   (* Binary operation: both operands must type-check, and the operation

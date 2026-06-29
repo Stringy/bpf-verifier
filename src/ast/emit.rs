@@ -215,7 +215,7 @@ fn emit_expr(out: &mut String, expr: &Expr) {
         Expr::UIntLit(v, w) => write!(out, "UIntLit {} {}", v, w).unwrap(),
         Expr::BoolLit(b) => write!(out, "BoolLit {}", b).unwrap(),
         Expr::VarRef(name, ty) => {
-            write!(out, "VarRef \"{}\" {} ()", name, emit_ctype(ty)).unwrap();
+            write!(out, "VarRef \"{}\" {} () ()", name, emit_ctype(ty)).unwrap();
         }
         Expr::BinOp(op, lhs, rhs) => {
             write!(out, "BinOp {} (", op).unwrap();

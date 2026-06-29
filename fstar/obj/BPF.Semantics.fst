@@ -72,16 +72,24 @@ let alu64 (op: alu_op) (dst_val src_val: UInt64.t) : option UInt64.t =
   | ADD -> Some (UInt64.add_mod dst_val src_val)
   | SUB -> Some (UInt64.sub_mod dst_val src_val)
   | MUL -> Some (UInt64.mul_mod dst_val src_val)
-  | DIV -> if src_val = 0uL then None else Some (UInt64.div dst_val src_val)
+  | DIV -> if src_val = 0uL then Some 0uL else Some (UInt64.div dst_val src_val)
   | OR  -> Some (UInt64.logor dst_val src_val)
   | AND -> Some (UInt64.logand dst_val src_val)
   | XOR -> Some (UInt64.logxor dst_val src_val)
   | MOV -> Some src_val
   | NEG -> Some (UInt64.sub_mod 0uL dst_val)
-  | MOD -> if src_val = 0uL then None else Some (UInt64.rem dst_val src_val)
+  | MOD -> if src_val = 0uL then Some dst_val else Some (UInt64.rem dst_val src_val)
   | LSH -> Some (UInt64.shift_left dst_val (UInt32.uint_to_t (UInt64.v src_val % 64)))
   | RSH -> Some (UInt64.shift_right dst_val (UInt32.uint_to_t (UInt64.v src_val % 64)))
-  | ARSH -> Some (UInt64.shift_right dst_val (UInt32.uint_to_t (UInt64.v src_val % 64)))
+  | ARSH ->
+    let shift = UInt32.uint_to_t (UInt64.v src_val % 64) in
+    let logical = UInt64.shift_right dst_val shift in
+    (* Sign-extend: if high bit was set, fill shifted-in bits with 1s *)
+    if UInt64.v dst_val >= pow2 63 && UInt64.v src_val % 64 > 0
+    then let fill_bits = 64 - (UInt64.v src_val % 64) in
+         let mask = UInt64.sub_mod 0uL (UInt64.shift_left 1uL (UInt32.uint_to_t fill_bits)) in
+         Some (UInt64.logor logical mask)
+    else Some logical
 
 (* 32-bit ALU — truncates to 32 bits, zero-extends result to 64. *)
 let alu32 (op: alu_op) (dst_val src_val: UInt64.t) : option UInt64.t =
@@ -91,16 +99,25 @@ let alu32 (op: alu_op) (dst_val src_val: UInt64.t) : option UInt64.t =
   | ADD -> Some (UInt64.uint_to_t (UInt32.v (UInt32.add_mod d32 s32)))
   | SUB -> Some (UInt64.uint_to_t (UInt32.v (UInt32.sub_mod d32 s32)))
   | MUL -> Some (UInt64.uint_to_t (UInt32.v (UInt32.mul_mod d32 s32)))
-  | DIV -> if s32 = 0ul then None else Some (UInt64.uint_to_t (UInt32.v (UInt32.div d32 s32)))
+  | DIV -> if s32 = 0ul then Some 0uL else Some (UInt64.uint_to_t (UInt32.v (UInt32.div d32 s32)))
   | OR  -> Some (UInt64.uint_to_t (UInt32.v (UInt32.logor d32 s32)))
   | AND -> Some (UInt64.uint_to_t (UInt32.v (UInt32.logand d32 s32)))
   | XOR -> Some (UInt64.uint_to_t (UInt32.v (UInt32.logxor d32 s32)))
   | MOV -> Some (UInt64.uint_to_t (UInt32.v s32))
   | NEG -> Some (UInt64.uint_to_t (UInt32.v (UInt32.sub_mod 0ul d32)))
-  | MOD -> if s32 = 0ul then None else Some (UInt64.uint_to_t (UInt32.v (UInt32.rem d32 s32)))
+  | MOD -> if s32 = 0ul then Some dst_val else Some (UInt64.uint_to_t (UInt32.v (UInt32.rem d32 s32)))
   | LSH -> Some (UInt64.uint_to_t (UInt32.v (UInt32.shift_left d32 (UInt32.uint_to_t (UInt32.v s32 % 32)))))
   | RSH -> Some (UInt64.uint_to_t (UInt32.v (UInt32.shift_right d32 (UInt32.uint_to_t (UInt32.v s32 % 32)))))
-  | ARSH -> Some (UInt64.uint_to_t (UInt32.v (UInt32.shift_right d32 (UInt32.uint_to_t (UInt32.v s32 % 32)))))
+  | ARSH ->
+    let shift = UInt32.uint_to_t (UInt32.v s32 % 32) in
+    let logical = UInt32.shift_right d32 shift in
+    let result =
+      if UInt32.v d32 >= pow2 31 && UInt32.v s32 % 32 > 0
+      then let fill_bits = 32 - (UInt32.v s32 % 32) in
+           let mask = UInt32.sub_mod 0ul (UInt32.shift_left 1ul (UInt32.uint_to_t fill_bits)) in
+           UInt32.logor logical mask
+      else logical
+    in Some (UInt64.uint_to_t (UInt32.v result))
 
 (* Jump condition evaluation on 64-bit values. *)
 let eval_jmp64 (op: jmp_op) (dst_val src_val: UInt64.t) : bool =
@@ -128,7 +145,7 @@ let eval_jmp32 (op: jmp_op) (dst_val src_val: UInt64.t) : bool =
   | JEQ  -> d = s
   | JGT  -> d > s
   | JGE  -> d >= s
-  | JSET -> d % 2 <> 0 || s % 2 <> 0
+  | JSET -> UInt32.v (UInt32.logand (UInt32.uint_to_t d) (UInt32.uint_to_t s)) <> 0
   | JNE  -> d <> s
   | JLT  -> d < s
   | JLE  -> d <= s
@@ -241,7 +258,10 @@ let exec_insn (st: bpf_state) (insn: bpf_insn) : option bpf_state =
   | BPF_ALU32_IMM op dst imm ->
     let dv = state_get_reg st dst in
     (match op with
-     | MOV -> Some (state_set_reg st dst (Scalar (sign_extend_imm imm)))
+     | MOV ->
+       (* ALU32 MOV zero-extends the 32-bit immediate to 64 bits *)
+       let v = UInt64.uint_to_t (Int32.v imm % pow2 32) in
+       Some (state_set_reg st dst (Scalar v))
      | _ ->
        (match scalar_val dv with
         | Some d ->
