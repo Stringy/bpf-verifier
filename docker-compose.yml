@@ -1,6 +1,8 @@
 services:
   verifier:
-    build: .
+    build:
+      context: .
+      dockerfile: Containerfile
     volumes:
-      - .:/workspace
-    working_dir: /workspace
+      - .:/work
+    working_dir: /work

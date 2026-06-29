@@ -1,0 +1,6 @@
+target/
+fstar/.cache/
+.git/
+.claude/
+scratch/
+*.bpf.o

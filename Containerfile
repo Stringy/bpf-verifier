@@ -33,14 +33,26 @@ RUN sudo mkdir -p /fstar-dist/bin /fstar-dist/lib \
     && sudo cp "$(opam var bin)/fstar.exe" /fstar-dist/bin/ \
     && sudo cp -r ulib /fstar-dist/lib/fstar
 
-# Stage 2: Minimal runtime image with all tools.
+# Stage 2: Build the Rust binary.
+FROM rust:bookworm AS rust-builder
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY src/ src/
+COPY build.rs build.rs
+COPY templates/ templates/
+COPY askama.toml askama.toml
+
+RUN cargo build --release
+
+# Stage 3: Minimal runtime image with all tools.
 FROM debian:bookworm-slim
 
-# System packages: clang (BPF target), make, curl (for rustup)
+# System packages: clang (BPF target), BPF headers
 RUN apt-get update && apt-get install -y --no-install-recommends \
     clang llvm lld \
-    libbpf-dev \
-    make ca-certificates curl \
+    libbpf-dev linux-headers-generic \
+    make ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # F* and Z3
@@ -49,12 +61,11 @@ COPY --from=fstar-builder /fstar-dist/lib/fstar/ /usr/local/lib/fstar/
 COPY --from=fstar-builder /usr/local/bin/z3-* /usr/local/bin/
 ENV FSTAR_HOME=/usr/local/lib/fstar
 
-# Rust (edition 2024 needs stable >= 1.85)
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain stable --profile minimal
-ENV PATH="/root/.cargo/bin:${PATH}"
+# bpf-verifier binary
+COPY --from=rust-builder /build/target/release/bpf-verifier /usr/local/bin/
 
-WORKDIR /workspace
-COPY . .
+# F* verification modules (both object-level and AST-level)
+COPY fstar/ /usr/local/share/bpf-verifier/fstar/
 
-CMD ["make", "test"]
+WORKDIR /work
+ENTRYPOINT ["bpf-verifier"]

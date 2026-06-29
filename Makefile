@@ -98,4 +98,4 @@ clean: clean-cache
 	cargo clean
 
 image:
-	docker build -t bpf-verifier .
+	podman build -f Containerfile -t bpf-verifier .

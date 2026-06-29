@@ -149,6 +149,13 @@ fn find_program<'a>(
 }
 
 fn project_root() -> PathBuf {
+    // Container install path (set in Containerfile)
+    let install_prefix = PathBuf::from("/usr/local/share/bpf-verifier");
+    if install_prefix.join("fstar").is_dir() {
+        return install_prefix;
+    }
+
+    // Development: walk up from the binary to find fstar/
     if let Ok(exe) = std::env::current_exe() {
         let mut dir = exe.parent().map(Path::to_path_buf);
         while let Some(d) = dir {
@@ -158,6 +165,8 @@ fn project_root() -> PathBuf {
             dir = d.parent().map(Path::to_path_buf);
         }
     }
+
+    // Fallback: current directory
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
