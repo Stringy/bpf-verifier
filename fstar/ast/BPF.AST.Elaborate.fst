@@ -192,9 +192,34 @@ let rec check_arity (expected:list helper_arg_desc) (actual:list s_expr) : bool 
 
 (* --- Statement checking --- *)
 
+(* Check a surface statement, with fall-through refinement for
+   early-return null checks.
+
+   When an SIf has one branch that returns (SReturn) and the other
+   continues (SNop or non-returning), the continuation should use
+   the refined context from the non-returning branch.
+
+   Example:
+     if (!ptr) return 0;   // then returns, else falls through
+     *ptr;                  // uses else's refined context (ptr is non-null)
+*)
+(* Check if a statement always returns (early return pattern) *)
+let rec returns_early (s:s_stmt) : bool =
+  match s with
+  | SReturn _ -> true
+  | SSeq first _ -> returns_early first
+  | _ -> false
+
 (* Check a surface statement. Returns the output variable context
-   if the statement is well-formed, or an error message. *)
+   if the statement is well-formed, or an error message.
+
+   check_stmt_refined is used for the first statement in a SSeq:
+   it detects early-return null checks and passes the refined context
+   to the continuation rather than joining. *)
 val check_stmt : pt:bpf_prog_type -> ctx:var_ctx -> s:s_stmt -> fuel:nat
+  -> Tot eresult (decreases fuel)
+
+val check_stmt_refined : pt:bpf_prog_type -> ctx:var_ctx -> s:s_stmt -> fuel:nat
   -> Tot eresult (decreases fuel)
 
 let rec check_stmt pt ctx s fuel =
@@ -219,7 +244,7 @@ let rec check_stmt pt ctx s fuel =
       EErr ("ill-typed assignment to '" ^ name ^ "'")
 
   | SSeq first second ->
-    (match check_stmt pt ctx first (fuel - 1) with
+    (match check_stmt_refined pt ctx first (fuel - 1) with
      | EErr msg -> EErr msg
      | EOk ctx_mid ->
        check_stmt pt ctx_mid second (fuel - 1))
@@ -286,7 +311,50 @@ let rec check_stmt pt ctx s fuel =
          let ret_vc = helper_return_vc helper in
          EOk (assign ctx var_name ret_vc)
        else
-         EErr ("helper '" ^ func_name ^ "' argument mismatch or not available"))
+          EErr ("helper '" ^ func_name ^ "' argument mismatch or not available"))
+
+(* check_stmt_refined: used as the first element of a SSeq.
+   For null-check SIf where one branch returns, passes the
+   refined context from the non-returning branch to the continuation. *)
+and check_stmt_refined pt ctx s fuel =
+  if fuel = 0 then EErr "elaboration fuel exhausted"
+  else
+  match s with
+  | SIf cond then_s else_s ->
+    if not (expr_ok ctx cond) then
+      EErr "ill-typed if condition"
+    else
+      (* Determine branch contexts based on null-check pattern *)
+      let null_check =
+        match is_null_check_surface cond with
+        | Some (var_name, is_negated) ->
+          if BPF.VarCtx.is_declared ctx var_name &&
+             BPF.ValClass.needs_null_check (BPF.VarCtx.get_class ctx var_name) &&
+             Some? (BPF.VarCtx.refine_not_null ctx var_name) &&
+             Some? (BPF.VarCtx.refine_is_null ctx var_name) then
+            let ctx_nn = Some?.v (BPF.VarCtx.refine_not_null ctx var_name) in
+            let ctx_null = Some?.v (BPF.VarCtx.refine_is_null ctx var_name) in
+            Some (if is_negated then (ctx_null, ctx_nn) else (ctx_nn, ctx_null))
+          else None
+        | None -> None
+      in
+      let ctx_then_in = (match null_check with Some (ct, _) -> ct | None -> ctx) in
+      let ctx_else_in = (match null_check with Some (_, ce) -> ce | None -> ctx) in
+      (* Early return pattern: if one branch returns, the continuation
+         gets the other branch's context (possibly refined) *)
+      if returns_early then_s then
+        (match check_stmt pt ctx_then_in then_s (fuel - 1) with
+         | EErr msg -> EErr msg
+         | EOk _ ->
+           check_stmt pt ctx_else_in else_s (fuel - 1))
+      else if returns_early else_s then
+        (match check_stmt pt ctx_else_in else_s (fuel - 1) with
+         | EErr msg -> EErr msg
+         | EOk _ ->
+           check_stmt pt ctx_then_in then_s (fuel - 1))
+      else
+        check_stmt pt ctx s (fuel - 1)
+  | _ -> check_stmt pt ctx s (fuel - 1)
 
 
 (* --- Top-level checking --- *)
