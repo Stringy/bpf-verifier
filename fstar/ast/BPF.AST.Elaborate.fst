@@ -73,12 +73,32 @@ let rec infer_type ctx e =
 
   | SBinOp op lhs rhs ->
     (match infer_type ctx lhs, infer_type ctx rhs with
-     | Some t1, Some t2 -> binop_result_type op t1 t2
+     | Some t1, Some t2 ->
+       (* Try exact match first *)
+       (match binop_result_type op t1 t2 with
+        | Some t -> Some t
+        | None ->
+          (* BPF implicitly widens to 64-bit. If both are numeric,
+             accept the operation with 64-bit result. *)
+          if is_numeric t1 && is_numeric t2 then
+            match op with
+            | Eq | Ne | Lt | Le | Gt | Ge | SLt | SLe | SGt | SGe -> Some CBool
+            | LAnd | LOr -> Some CBool
+            | _ -> Some (CUInt W64)  (* arithmetic/bitwise: widen to u64 *)
+          else None)
      | _, _ -> None)
 
   | SUnaryOp op operand ->
     (match infer_type ctx operand with
-     | Some t -> unaryop_result_type op t
+     | Some t ->
+       (match unaryop_result_type op t with
+        | Some tr -> Some tr
+        | None ->
+          (* BPF allows LNot on any type (truthy/falsy), and Neg on any numeric *)
+          match op with
+          | LNot -> Some CBool  (* !x is always bool *)
+          | Neg -> if is_numeric t then Some t else None
+          | BitNot -> if is_numeric t then Some t else None)
      | None -> None)
 
   | SDeref ptr ->
@@ -119,13 +139,21 @@ let expr_ok (ctx:var_ctx) (e:s_expr) : bool =
 
 (* --- Null check pattern recognition --- *)
 
-let is_null_check_surface (e:s_expr) : option string =
+(* Recognise null check patterns. Returns (var_name, is_negated).
+   is_negated = true means the condition is "if (!ptr)" rather than "if (ptr)",
+   so the then/else branches need to be swapped for context refinement. *)
+let is_null_check_surface (e:s_expr) : option (string & bool) =
   match e with
-  | SVarRef name -> Some name
-  | SBinOp Ne (SVarRef name) (SIntLit 0 _) -> Some name
-  | SBinOp Ne (SIntLit 0 _) (SVarRef name) -> Some name
-  | SBinOp Ne (SVarRef name) (SUIntLit 0 _) -> Some name
-  | SBinOp Ne (SUIntLit 0 _) (SVarRef name) -> Some name
+  | SVarRef name -> Some (name, false)
+  | SBinOp Ne (SVarRef name) (SIntLit 0 _) -> Some (name, false)
+  | SBinOp Ne (SIntLit 0 _) (SVarRef name) -> Some (name, false)
+  | SBinOp Ne (SVarRef name) (SUIntLit 0 _) -> Some (name, false)
+  | SBinOp Ne (SUIntLit 0 _) (SVarRef name) -> Some (name, false)
+  | SBinOp Eq (SVarRef name) (SIntLit 0 _) -> Some (name, true)
+  | SBinOp Eq (SIntLit 0 _) (SVarRef name) -> Some (name, true)
+  | SBinOp Eq (SVarRef name) (SUIntLit 0 _) -> Some (name, true)
+  | SBinOp Eq (SUIntLit 0 _) (SVarRef name) -> Some (name, true)
+  | SUnaryOp LNot (SVarRef name) -> Some (name, true)
   | _ -> None
 
 (* --- Helper resolution --- *)
@@ -202,15 +230,19 @@ let rec check_stmt pt ctx s fuel =
     else
       (* Check for null-check pattern *)
       (match is_null_check_surface cond with
-       | Some var_name ->
+       | Some (var_name, is_negated) ->
          if BPF.VarCtx.is_declared ctx var_name &&
             BPF.ValClass.needs_null_check (BPF.VarCtx.get_class ctx var_name) &&
             Some? (BPF.VarCtx.refine_not_null ctx var_name) &&
             Some? (BPF.VarCtx.refine_is_null ctx var_name) then
            let ctx_nn = Some?.v (BPF.VarCtx.refine_not_null ctx var_name) in
            let ctx_null = Some?.v (BPF.VarCtx.refine_is_null ctx var_name) in
-           (match check_stmt pt ctx_nn then_s (fuel - 1),
-                  check_stmt pt ctx_null else_s (fuel - 1) with
+           (* If negated (e.g. if (!ptr)), swap the branch contexts:
+              then_s gets the null context, else_s gets the not-null context *)
+           let ctx_then_in = if is_negated then ctx_null else ctx_nn in
+           let ctx_else_in = if is_negated then ctx_nn else ctx_null in
+           (match check_stmt pt ctx_then_in then_s (fuel - 1),
+                  check_stmt pt ctx_else_in else_s (fuel - 1) with
             | EOk ctx_then, EOk ctx_else -> EOk (join_ctx ctx_then ctx_else)
             | EErr msg, _ -> EErr msg
             | _, EErr msg -> EErr msg)

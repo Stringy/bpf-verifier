@@ -85,23 +85,26 @@ fn emit_single_stmt(out: &mut String, stmt: &Stmt, indent: usize) {
                 None => {
                     write!(out, "SDeclare \"{name}\" {} None", emit_ctype(ty)).unwrap();
                 }
-                Some(Expr::Call(func_name, args)) => {
-                    // Declaration with helper call init: lower to
-                    // SSeq (SDeclare) (SCallStmt name func args)
-                    write!(out, "SSeq (SDeclare \"{name}\" {} None)\n", emit_ctype(ty)).unwrap();
-                    write!(out, "{pad}  (SCallStmt \"{name}\" \"{func_name}\" [").unwrap();
-                    for (i, arg) in args.iter().enumerate() {
-                        if i > 0 {
-                            write!(out, "; ").unwrap();
+                Some(init_expr) => {
+                    // Check if the init expression contains a helper call
+                    // (possibly wrapped in a cast). If so, lower to
+                    // SSeq (SDeclare) (SCallStmt).
+                    if let Some((func_name, args)) = extract_call(init_expr) {
+                        write!(out, "SSeq (SDeclare \"{name}\" {} None)\n", emit_ctype(ty))
+                            .unwrap();
+                        write!(out, "{pad}  (SCallStmt \"{name}\" \"{func_name}\" [").unwrap();
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 {
+                                write!(out, "; ").unwrap();
+                            }
+                            emit_surface_expr(out, arg);
                         }
-                        emit_surface_expr(out, arg);
+                        write!(out, "])").unwrap();
+                    } else {
+                        write!(out, "SDeclare \"{name}\" {} (Some (", emit_ctype(ty)).unwrap();
+                        emit_surface_expr(out, init_expr);
+                        write!(out, "))").unwrap();
                     }
-                    write!(out, "])").unwrap();
-                }
-                Some(expr) => {
-                    write!(out, "SDeclare \"{name}\" {} (Some (", emit_ctype(ty)).unwrap();
-                    emit_surface_expr(out, expr);
-                    write!(out, "))").unwrap();
                 }
             }
         }
@@ -163,6 +166,16 @@ fn emit_single_stmt(out: &mut String, stmt: &Stmt, indent: usize) {
             // TODO: lower switch to nested SIf
             write!(out, "SNop").unwrap();
         }
+    }
+}
+
+/// Extract a function call from an expression, looking through casts.
+/// Returns (func_name, args) if found.
+fn extract_call(expr: &Expr) -> Option<(&str, &[Expr])> {
+    match expr {
+        Expr::Call(name, args) => Some((name, args)),
+        Expr::Cast(inner, _) => extract_call(inner),
+        _ => None,
     }
 }
 

@@ -115,7 +115,7 @@ pub fn convert_translation_unit(root: &Node, source_file: &str) -> Result<BpfObj
             .find(|n| n.kind == "SectionAttr")
             .and_then(|n| n.section_name.as_deref());
         let section = match section {
-            Some(s) if s != "license" && s != ".maps" => s,
+            Some(s) if s != "license" && s != ".maps" && s != ".ksyms" => s,
             _ => continue,
         };
 
