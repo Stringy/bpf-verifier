@@ -108,3 +108,48 @@ let test_undeclared : s_prog = {
 
 let _ : squash (check_ok ProgSocketFilter test_undeclared == false) =
   _ by (ast_check_tac ())
+
+(* --- Test 7: map lookup with null check ---
+   int test(void *ctx) {
+     int key = 0;
+     int *val = bpf_map_lookup_elem(&my_map, &key);
+     if (val)
+       return *val;
+     return -1;
+   }
+*)
+let test_map_lookup : s_prog = {
+  sp_name = "test_map_lookup";
+  sp_section = "test";
+  sp_param_name = "ctx";
+  sp_body = SSeq
+    (SDeclare "key" (CInt W32) (Some (SIntLit 0 W32)))
+    (SSeq
+      (SCallStmt "val" "bpf_map_lookup_elem" [SVarRef "key"; SVarRef "key"])
+      (SIf (SVarRef "val")
+        (* then: val is non-null, can dereference *)
+        (SReturn (Some (SDeref (SVarRef "val"))))
+        (* else: val is null *)
+        (SReturn (Some (SIntLit (-1) W32)))));
+}
+
+let _ : squash (check_ok ProgSocketFilter test_map_lookup == true) =
+  _ by (ast_check_tac ())
+
+(* --- Test 8: null deref without check should fail ---
+   int test(void *ctx) {
+     int *val = bpf_map_lookup_elem(&my_map, &key);
+     return *val;  // BUG: no null check!
+   }
+*)
+let test_null_deref : s_prog = {
+  sp_name = "test_null_deref";
+  sp_section = "test";
+  sp_param_name = "ctx";
+  sp_body = SSeq
+    (SCallStmt "val" "bpf_map_lookup_elem" [SVarRef "ctx"; SVarRef "ctx"])
+    (SReturn (Some (SDeref (SVarRef "val"))));
+}
+
+let _ : squash (check_ok ProgSocketFilter test_null_deref == false) =
+  _ by (ast_check_tac ())
