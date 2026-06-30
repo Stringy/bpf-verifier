@@ -126,6 +126,9 @@ enum AstCommands {
 
         #[arg(long, help = "Show generated F* source")]
         verbose: bool,
+
+        #[arg(long, help = "Use surface AST + tactic approach (simpler, more robust)")]
+        surface: bool,
     },
     /// Generate F* AST module from a BPF C source file (without running F*)
     Codegen {
@@ -137,6 +140,9 @@ enum AstCommands {
 
         #[arg(long, help = "F* module name (derived from output if not given)")]
         module_name: Option<String>,
+
+        #[arg(long, help = "Use surface AST + tactic approach (simpler, more robust)")]
+        surface: bool,
     },
 }
 
@@ -262,23 +268,27 @@ fn main() {
                 output,
                 module_name,
                 verbose,
+                surface,
             } => run_ast_verify(
                 &input,
                 output.as_deref(),
                 module_name.as_deref(),
                 true,
                 verbose,
+                surface,
             ),
             AstCommands::Codegen {
                 input,
                 output,
                 module_name,
+                surface,
             } => run_ast_verify(
                 &input,
                 output.as_deref(),
                 module_name.as_deref(),
                 false,
                 false,
+                surface,
             ),
         },
     };
@@ -637,6 +647,7 @@ fn run_ast_verify(
     module_name: Option<&str>,
     run_fstar: bool,
     verbose: bool,
+    surface: bool,
 ) -> i32 {
     use ast::load::{self, LoadedAst};
 
@@ -694,7 +705,11 @@ fn run_ast_verify(
             .unwrap_or("BPF.Generated")
     });
 
-    let fstar_source = ast::emit::emit_module(&bpf_obj, mod_name);
+    let fstar_source = if surface {
+        ast::emit_surface::emit_surface_module(&bpf_obj, mod_name)
+    } else {
+        ast::emit::emit_module(&bpf_obj, mod_name)
+    };
 
     if verbose {
         eprintln!("--- Generated F* ---");
