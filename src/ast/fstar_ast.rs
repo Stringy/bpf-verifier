@@ -62,6 +62,10 @@ pub enum UnaryOp {
     Neg,
     BitNot,
     LNot,
+    PreInc,
+    PreDec,
+    PostInc,
+    PostDec,
 }
 
 /// Expression (mirrors BPF.AST.Expr.expr, but unindexed — indices are
@@ -81,6 +85,16 @@ pub enum Expr {
     Call(String, Vec<Expr>),
     /// Ternary: cond ? then : else
     Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
+    /// Array subscript: arr[idx]
+    ArraySubscript(Box<Expr>, Box<Expr>),
+    /// sizeof(type) or sizeof(expr) — stored as a constant value
+    SizeOf(u64),
+    /// String literal
+    StringLit(String),
+    /// GNU statement expression ({ ...; expr; })
+    StmtExpr(Vec<super::fstar_ast::Stmt>, Box<Expr>),
+    /// Compound literal / initialiser list — zero-init or partial init
+    InitList(Vec<Expr>),
 }
 
 /// Statement (mirrors BPF.AST.Stmt.stmt, but unindexed)
@@ -98,6 +112,22 @@ pub enum Stmt {
     ExprStmt(Expr),
     /// Compound (block)
     Compound(Vec<Stmt>),
+    /// Goto (target label name)
+    Goto(String),
+    /// Label (name, body statement)
+    Label(String, Box<Stmt>),
+    /// Switch statement
+    Switch(Expr, Vec<SwitchCase>),
+    /// Break
+    Break,
+}
+
+/// A single case in a switch statement.
+#[derive(Debug, Clone)]
+pub struct SwitchCase {
+    /// None = default case
+    pub value: Option<Expr>,
+    pub body: Vec<Stmt>,
 }
 
 /// Map definition (mirrors BPF.AST.Decl.map_def)
@@ -173,6 +203,10 @@ impl fmt::Display for UnaryOp {
             UnaryOp::Neg => write!(f, "Neg"),
             UnaryOp::BitNot => write!(f, "BitNot"),
             UnaryOp::LNot => write!(f, "LNot"),
+            UnaryOp::PreInc => write!(f, "PreInc"),
+            UnaryOp::PreDec => write!(f, "PreDec"),
+            UnaryOp::PostInc => write!(f, "PostInc"),
+            UnaryOp::PostDec => write!(f, "PostDec"),
         }
     }
 }

@@ -27,8 +27,13 @@ pub fn convert_translation_unit(root: &Node, source_file: &str) -> Result<BpfObj
     let mut progs = Vec::new();
     let mut current_file = String::new();
 
+    // First pass: collect all function declarations from the user's
+    // source file. We need to see all of them before converting because
+    // BPF_PROG macro creates a trampoline + inner function pair and we
+    // need to resolve the inner function's body.
+    let mut all_func_nodes: Vec<&Node> = Vec::new();
+
     for node in &root.inner {
-        // Skip implicit/builtin declarations
         if node.is_implicit.unwrap_or(false) {
             continue;
         }
@@ -44,7 +49,6 @@ pub fn convert_translation_unit(root: &Node, source_file: &str) -> Result<BpfObj
             }
         }
 
-        // Only process declarations from the user's source file
         let is_user_source = current_file.contains(source_file)
             || current_file.is_empty();
 
@@ -54,13 +58,7 @@ pub fn convert_translation_unit(root: &Node, source_file: &str) -> Result<BpfObj
 
         match node.kind.as_str() {
             "FunctionDecl" => {
-                if let Some(name) = &node.name {
-                    if let Some(prog) = convert_function(node)
-                        .with_context(|| format!("converting function '{}'", name))?
-                    {
-                        progs.push(prog);
-                    }
-                }
+                all_func_nodes.push(node);
             }
             "VarDecl" => {
                 if let Some(name) = &node.name {
@@ -72,6 +70,69 @@ pub fn convert_translation_unit(root: &Node, source_file: &str) -> Result<BpfObj
                 }
             }
             _ => {}
+        }
+    }
+
+    // Second pass: convert functions, handling BPF_PROG trampolines.
+    //
+    // BPF_PROG(name, args...) expands to:
+    //   - trace_name(unsigned long long *ctx)  [SEC'd trampoline]
+    //   - ____trace_name(unsigned long long *ctx, typed_args...)  [real body]
+    //
+    // We want to emit the real body with the typed parameters, but
+    // attribute it to the SEC'd name and section.
+    //
+    // Build a map from "____<name>" to its node (with body) so we can
+    // look up the inner function when processing a trampoline.
+
+    let mut inner_funcs: std::collections::HashMap<String, &Node> = std::collections::HashMap::new();
+    for node in &all_func_nodes {
+        if let Some(name) = &node.name {
+            if name.starts_with("____") {
+                let has_body = node.inner.iter().any(|n| n.kind == "CompoundStmt");
+                if has_body {
+                    inner_funcs.insert(name.clone(), node);
+                }
+            }
+        }
+    }
+
+    let mut seen_sections = std::collections::HashSet::new();
+
+    for node in &all_func_nodes {
+        let name = match &node.name {
+            Some(n) => n,
+            None => continue,
+        };
+
+        // Skip ____-prefixed functions — they'll be pulled in via trampolines
+        if name.starts_with("____") {
+            continue;
+        }
+
+        // Only convert functions with a SEC attribute
+        let section = node.inner.iter()
+            .find(|n| n.kind == "SectionAttr")
+            .and_then(|n| n.section_name.as_deref());
+        let section = match section {
+            Some(s) if s != "license" && s != ".maps" => s,
+            _ => continue,
+        };
+
+        // Deduplicate: skip if we've already seen this section
+        if !seen_sections.insert(section.to_string()) {
+            continue;
+        }
+
+        // Check if there's a ____-prefixed inner function with the real body
+        let inner_name = format!("____{}", name);
+        let body_node = inner_funcs.get(&inner_name).copied().unwrap_or(node);
+
+        match convert_function_with_body(node, body_node)
+            .with_context(|| format!("converting function '{}'", name))?
+        {
+            Some(prog) => progs.push(prog),
+            None => {}
         }
     }
 
@@ -97,13 +158,22 @@ pub fn parse_c_type(type_str: &str) -> Result<CType> {
         return Ok(CType::CPtr(Box::new(inner_type)));
     }
 
+    // Array types: "type[N]"
+    if let Some(bracket_pos) = s.find('[') {
+        let elem_type_str = s[..bracket_pos].trim();
+        let size_str = s[bracket_pos + 1..].trim_end_matches(']').trim();
+        let elem_type = parse_c_type(elem_type_str)?;
+        let size: usize = size_str.parse().unwrap_or(0);
+        return Ok(CType::CArray(Box::new(elem_type), size));
+    }
+
     // Basic types
     match s {
         "void" => Ok(CType::CVoid),
         "_Bool" | "bool" => Ok(CType::CBool),
 
         // Unsigned
-        "unsigned char" | "__u8" | "uint8_t" | "u8" => Ok(CType::CUInt(IntWidth::W8)),
+        "char" | "unsigned char" | "__u8" | "uint8_t" | "u8" => Ok(CType::CUInt(IntWidth::W8)),
         "unsigned short" | "__u16" | "uint16_t" | "u16" => Ok(CType::CUInt(IntWidth::W16)),
         "unsigned int" | "__u32" | "uint32_t" | "u32" => Ok(CType::CUInt(IntWidth::W32)),
         "unsigned long" | "unsigned long long" | "__u64" | "uint64_t" | "u64" => {
@@ -126,58 +196,85 @@ pub fn parse_c_type(type_str: &str) -> Result<CType> {
             }))
         }
 
-        _ => Err(anyhow!("unrecognised C type: '{}'", s)),
+        // Typedef names ending in _t — common in BPF/kernel code for
+        // enum wrappers, integer typedefs, etc.
+        s if s.ends_with("_t") => Ok(CType::CInt(IntWidth::W32)),
+
+        // Fallback: treat unrecognised types as opaque pointer-sized values.
+        // This handles typeof_unqual, __typeof__, and other compiler
+        // builtins that appear in BPF_CORE_READ macro expansions.
+        _ => Ok(CType::CUInt(IntWidth::W64)),
     }
 }
 
-/// Convert a FunctionDecl into a BpfProg, if it has a SEC() attribute.
-fn convert_function(node: &Node) -> Result<Option<BpfProg>> {
-    let name = node.name.as_deref().unwrap_or("?");
+/// Convert a FunctionDecl into a BpfProg using a (possibly different) node for the body.
+///
+/// `sec_node` provides the section attribute and programme name.
+/// `body_node` provides the parameters and body — this may be the same node,
+/// or it may be the `____`-prefixed inner function from a BPF_PROG expansion.
+fn convert_function_with_body(sec_node: &Node, body_node: &Node) -> Result<Option<BpfProg>> {
+    let name = sec_node.name.as_deref().unwrap_or("?");
 
-    // Find section attribute — Clang stores it in the `section_name` field
-    let section = node
+    let section = sec_node
         .inner
         .iter()
         .find(|n| n.kind == "SectionAttr")
         .and_then(|n| n.section_name.as_deref());
 
-    // Skip functions without SEC() — they're not BPF programme entry points
     let section = match section {
-        Some(s) => s.to_string(),
-        None => return Ok(None),
+        Some(s) if s != "license" && s != ".maps" => s.to_string(),
+        _ => return Ok(None),
     };
 
-    // Skip license and other non-programme sections
-    if section == "license" || section == ".maps" {
-        return Ok(None);
-    }
-
-    // Get return type
-    let return_type = node
+    // Get return type from the SEC'd function (always int for BPF progs)
+    let return_type = sec_node
         .qual_type()
-        .and_then(|t| {
-            // Function type is "int (struct __sk_buff *)" — extract return type
-            t.split('(').next().map(|r| r.trim())
-        })
+        .and_then(|t| t.split('(').next().map(|r| r.trim()))
         .map(parse_c_type)
         .transpose()?
         .unwrap_or(CType::CInt(IntWidth::W32));
 
-    // Get parameter
-    let param = node.first_child_of_kind("ParmVarDecl");
-    let param_name = param
-        .and_then(|p| p.name.as_deref())
-        .unwrap_or("ctx")
-        .to_string();
-    let param_type = param
-        .and_then(|p| p.qual_type())
-        .map(parse_c_type)
-        .transpose()?
-        .unwrap_or(CType::CPtr(Box::new(CType::CVoid)));
+    // Get parameters from body_node — for BPF_PROG trampolines, the inner
+    // function has the typed parameters (skipping the first ctx param which
+    // is the raw unsigned long long *ctx from the trampoline).
+    let params: Vec<&Node> = body_node.children_of_kind("ParmVarDecl");
+    let (param_name, param_type) = if std::ptr::eq(sec_node, body_node) {
+        // Same node — use the first parameter as-is
+        let param = params.first();
+        let pn = param
+            .and_then(|p| p.name.as_deref())
+            .unwrap_or("ctx")
+            .to_string();
+        let pt = param
+            .and_then(|p| p.qual_type())
+            .map(parse_c_type)
+            .transpose()?
+            .unwrap_or(CType::CPtr(Box::new(CType::CVoid)));
+        (pn, pt)
+    } else {
+        // Inner function from BPF_PROG — skip the first param (raw ctx)
+        // and use the second (typed context pointer)
+        if params.len() >= 2 {
+            let typed_param = params[1];
+            let pn = typed_param
+                .name
+                .as_deref()
+                .unwrap_or("ctx")
+                .to_string();
+            let pt = typed_param
+                .qual_type()
+                .map(parse_c_type)
+                .transpose()?
+                .unwrap_or(CType::CPtr(Box::new(CType::CVoid)));
+            (pn, pt)
+        } else {
+            ("ctx".to_string(), CType::CPtr(Box::new(CType::CVoid)))
+        }
+    };
 
-    // Get body (CompoundStmt)
-    let body_node = node.first_child_of_kind("CompoundStmt");
-    let body = match body_node {
+    // Get body from body_node
+    let body_compound = body_node.first_child_of_kind("CompoundStmt");
+    let body = match body_compound {
         Some(compound) => convert_compound_stmt(compound)?,
         None => vec![],
     };
@@ -295,11 +392,203 @@ fn convert_stmt(node: &Node) -> Result<Stmt> {
             Ok(Stmt::Compound(stmts))
         }
 
+        "GotoStmt" => {
+            let label = node.name.as_deref().unwrap_or("?").to_string();
+            Ok(Stmt::Goto(label))
+        }
+
+        "LabelStmt" => {
+            let label = node.name.as_deref().unwrap_or("?").to_string();
+            // The labelled statement is the first (and only) child
+            let body = if let Some(child) = node.inner.first() {
+                convert_stmt(child)?
+            } else {
+                Stmt::Compound(vec![])
+            };
+            Ok(Stmt::Label(label, Box::new(body)))
+        }
+
+        "SwitchStmt" => {
+            convert_switch(node)
+        }
+
+        "BreakStmt" => Ok(Stmt::Break),
+
+        // Clang wraps the default: branch body in a DefaultStmt node.
+        // We handle it like a compound of its children.
+        "DefaultStmt" => {
+            let stmts: Result<Vec<Stmt>> = node.inner.iter().map(convert_stmt).collect();
+            Ok(Stmt::Compound(stmts?))
+        }
+
         // Expression statement (e.g. function call as a statement)
         _ => {
+            // Check for assignment: BinaryOperator with "=" opcode
+            if node.kind == "BinaryOperator" && node.opcode.as_deref() == Some("=") {
+                if let Some(assign) = try_convert_assignment(node)? {
+                    return Ok(assign);
+                }
+            }
+            // Check for compound assignment: +=, -=, etc.
+            if node.kind == "CompoundAssignOperator" {
+                if let Some(assign) = try_convert_compound_assignment(node)? {
+                    return Ok(assign);
+                }
+            }
+            // Increment/decrement as statement: x++ or ++x
+            if node.kind == "UnaryOperator" {
+                if let Some(op) = node.opcode.as_deref() {
+                    if op == "++" || op == "--" {
+                        if let Some(assign) = try_convert_inc_dec_stmt(node, op)? {
+                            return Ok(assign);
+                        }
+                    }
+                }
+            }
             let expr = convert_expr(node)?;
             Ok(Stmt::ExprStmt(expr))
         }
+    }
+}
+
+/// Convert a SwitchStmt into our Switch representation.
+///
+/// Clang represents switch as:
+///   SwitchStmt → [condition_expr, CompoundStmt]
+///   CompoundStmt → [CaseStmt, CaseStmt, DefaultStmt, ...]
+///   CaseStmt → [value_expr, body_stmt, ...]
+fn convert_switch(node: &Node) -> Result<Stmt> {
+    if node.inner.len() < 2 {
+        bail!("SwitchStmt with fewer than 2 children");
+    }
+
+    let cond = convert_expr(&node.inner[0])?;
+
+    // The second child is typically a CompoundStmt containing CaseStmt nodes
+    let body = &node.inner[1];
+    let case_nodes = if body.kind == "CompoundStmt" {
+        &body.inner
+    } else {
+        std::slice::from_ref(body)
+    };
+
+    let mut cases = Vec::new();
+    for case_node in case_nodes {
+        match case_node.kind.as_str() {
+            "CaseStmt" => {
+                if case_node.inner.is_empty() {
+                    continue;
+                }
+                // First child is the case value (possibly wrapped in ConstantExpr)
+                let value = convert_expr(&case_node.inner[0])?;
+                // Remaining children are the body statements
+                let body_stmts: Result<Vec<Stmt>> =
+                    case_node.inner[1..].iter().map(convert_stmt).collect();
+                cases.push(SwitchCase {
+                    value: Some(value),
+                    body: body_stmts?,
+                });
+            }
+            "DefaultStmt" => {
+                let body_stmts: Result<Vec<Stmt>> =
+                    case_node.inner.iter().map(convert_stmt).collect();
+                cases.push(SwitchCase {
+                    value: None,
+                    body: body_stmts?,
+                });
+            }
+            _ => {
+                // Stray statement between cases — append to previous case
+                let stmt = convert_stmt(case_node)?;
+                if let Some(last) = cases.last_mut() {
+                    last.body.push(stmt);
+                }
+            }
+        }
+    }
+
+    Ok(Stmt::Switch(cond, cases))
+}
+
+/// Try to convert a BinaryOperator with "=" into an Assign statement.
+///
+/// Returns None if the LHS isn't a simple variable reference (e.g. it's
+/// a struct field assignment like `args.metrics = ...` which we model
+/// as an expression statement instead).
+fn try_convert_assignment(node: &Node) -> Result<Option<Stmt>> {
+    if node.inner.len() < 2 {
+        return Ok(None);
+    }
+    let lhs = &node.inner[0];
+    let rhs = &node.inner[1];
+
+    // Simple variable assignment: x = expr
+    if let Some(name) = extract_lhs_var_name(lhs) {
+        let value = convert_expr(rhs)?;
+        return Ok(Some(Stmt::Assign(name, value)));
+    }
+    Ok(None)
+}
+
+/// Try to convert a CompoundAssignOperator (+=, -=, etc.) into an Assign.
+fn try_convert_compound_assignment(node: &Node) -> Result<Option<Stmt>> {
+    if node.inner.len() < 2 {
+        return Ok(None);
+    }
+    let op = node
+        .opcode
+        .as_deref()
+        .ok_or_else(|| anyhow!("CompoundAssignOperator without opcode"))?;
+
+    let binop = match op {
+        "+=" => BinOp::Add,
+        "-=" => BinOp::Sub,
+        "*=" => BinOp::Mul,
+        "/=" => BinOp::Div,
+        "%=" => BinOp::Mod,
+        "&=" => BinOp::BitAnd,
+        "|=" => BinOp::BitOr,
+        "^=" => BinOp::BitXor,
+        "<<=" => BinOp::ShiftL,
+        ">>=" => BinOp::ShiftR,
+        _ => return Ok(None),
+    };
+
+    let lhs = &node.inner[0];
+    let rhs = &node.inner[1];
+
+    if let Some(name) = extract_lhs_var_name(lhs) {
+        let lhs_expr = convert_expr(lhs)?;
+        let rhs_expr = convert_expr(rhs)?;
+        let combined = Expr::BinOp(binop, Box::new(lhs_expr), Box::new(rhs_expr));
+        return Ok(Some(Stmt::Assign(name, combined)));
+    }
+    Ok(None)
+}
+
+/// Try to convert a unary ++/-- as a statement into an Assign.
+fn try_convert_inc_dec_stmt(node: &Node, op: &str) -> Result<Option<Stmt>> {
+    if node.inner.is_empty() {
+        return Ok(None);
+    }
+    let operand = &node.inner[0];
+    if let Some(name) = extract_lhs_var_name(operand) {
+        let var_expr = convert_expr(operand)?;
+        let one = Expr::IntLit(1, IntWidth::W32);
+        let binop = if op == "++" { BinOp::Add } else { BinOp::Sub };
+        let combined = Expr::BinOp(binop, Box::new(var_expr), Box::new(one));
+        return Ok(Some(Stmt::Assign(name, combined)));
+    }
+    Ok(None)
+}
+
+/// Extract the variable name from an LHS expression if it's a simple
+/// variable reference (possibly wrapped in implicit casts).
+fn extract_lhs_var_name(node: &Node) -> Option<String> {
+    match node.kind.as_str() {
+        "DeclRefExpr" => node.ref_name().map(|s| s.to_string()),
+        "ImplicitCastExpr" => node.inner.first().and_then(extract_lhs_var_name),
+        _ => None,
     }
 }
 
@@ -338,18 +627,44 @@ fn convert_expr(node: &Node) -> Result<Expr> {
             Ok(Expr::VarRef(name, ty))
         }
 
-        "BinaryOperator" => {
+        "BinaryOperator" | "CompoundAssignOperator" => {
             let op = node
                 .opcode
                 .as_deref()
                 .ok_or_else(|| anyhow!("BinaryOperator without opcode"))?;
-            let op = parse_binop(op)?;
             if node.inner.len() < 2 {
                 bail!("BinaryOperator with fewer than 2 children");
             }
-            let lhs = convert_expr(&node.inner[0])?;
-            let rhs = convert_expr(&node.inner[1])?;
-            Ok(Expr::BinOp(op, Box::new(lhs), Box::new(rhs)))
+            // Assignment operators in expression context — model as the
+            // RHS value (the assignment side-effect is handled at the
+            // statement level when possible).
+            match op {
+                "=" => {
+                    // In expression context, x = y evaluates to y
+                    convert_expr(&node.inner[1])
+                }
+                "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" => {
+                    // Compound assignment in expression context — model as the
+                    // binary operation (lhs op rhs)
+                    let compound_op = match op {
+                        "+=" => BinOp::Add, "-=" => BinOp::Sub,
+                        "*=" => BinOp::Mul, "/=" => BinOp::Div,
+                        "%=" => BinOp::Mod, "&=" => BinOp::BitAnd,
+                        "|=" => BinOp::BitOr, "^=" => BinOp::BitXor,
+                        "<<=" => BinOp::ShiftL, ">>=" => BinOp::ShiftR,
+                        _ => unreachable!(),
+                    };
+                    let lhs = convert_expr(&node.inner[0])?;
+                    let rhs = convert_expr(&node.inner[1])?;
+                    Ok(Expr::BinOp(compound_op, Box::new(lhs), Box::new(rhs)))
+                }
+                _ => {
+                    let op = parse_binop(op)?;
+                    let lhs = convert_expr(&node.inner[0])?;
+                    let rhs = convert_expr(&node.inner[1])?;
+                    Ok(Expr::BinOp(op, Box::new(lhs), Box::new(rhs)))
+                }
+            }
         }
 
         "UnaryOperator" => {
@@ -360,31 +675,24 @@ fn convert_expr(node: &Node) -> Result<Expr> {
             if node.inner.is_empty() {
                 bail!("UnaryOperator with no children");
             }
+            let inner = convert_expr(&node.inner[0])?;
             match op {
-                "*" => {
-                    // Pointer dereference
-                    let inner = convert_expr(&node.inner[0])?;
-                    Ok(Expr::Deref(Box::new(inner)))
-                }
-                "&" => {
-                    let inner = convert_expr(&node.inner[0])?;
-                    Ok(Expr::AddrOf(Box::new(inner)))
-                }
-                "-" => {
-                    let inner = convert_expr(&node.inner[0])?;
-                    Ok(Expr::UnaryOp(UnaryOp::Neg, Box::new(inner)))
-                }
-                "~" => {
-                    let inner = convert_expr(&node.inner[0])?;
-                    Ok(Expr::UnaryOp(UnaryOp::BitNot, Box::new(inner)))
-                }
-                "!" => {
-                    let inner = convert_expr(&node.inner[0])?;
-                    Ok(Expr::UnaryOp(UnaryOp::LNot, Box::new(inner)))
-                }
+                "*" => Ok(Expr::Deref(Box::new(inner))),
+                "&" => Ok(Expr::AddrOf(Box::new(inner))),
+                "-" => Ok(Expr::UnaryOp(UnaryOp::Neg, Box::new(inner))),
+                "~" => Ok(Expr::UnaryOp(UnaryOp::BitNot, Box::new(inner))),
+                "!" => Ok(Expr::UnaryOp(UnaryOp::LNot, Box::new(inner))),
+                "++" => Ok(Expr::UnaryOp(UnaryOp::PreInc, Box::new(inner))),
+                "--" => Ok(Expr::UnaryOp(UnaryOp::PreDec, Box::new(inner))),
                 _ => Err(anyhow!("unrecognised unary operator: '{}'", op)),
             }
         }
+
+        // Postfix increment/decrement — Clang uses a separate node kind
+        // but in practice it appears as UnaryOperator with isPostfix.
+        // Some clang versions emit it as UnaryOperator with "++" opcode
+        // regardless. We handle both prefix and postfix the same way
+        // since our AST models the side effect, not the evaluation order.
 
         "CallExpr" => {
             // First child is the function expression (usually a DeclRefExpr
@@ -460,6 +768,102 @@ fn convert_expr(node: &Node) -> Result<Expr> {
             };
             Ok(Expr::FieldAccess(Box::new(base), field))
         }
+
+        "ArraySubscriptExpr" => {
+            // arr[idx] — first child is the array/pointer, second is the index
+            if node.inner.len() < 2 {
+                bail!("ArraySubscriptExpr with fewer than 2 children");
+            }
+            let base = convert_expr(&node.inner[0])?;
+            let index = convert_expr(&node.inner[1])?;
+            Ok(Expr::ArraySubscript(Box::new(base), Box::new(index)))
+        }
+
+        "StringLiteral" => {
+            let val = node
+                .value
+                .as_deref()
+                .unwrap_or("\"\"")
+                .to_string();
+            // Clang includes the surrounding quotes in the value field
+            let val = val.trim_matches('"').to_string();
+            Ok(Expr::StringLit(val))
+        }
+
+        "UnaryExprOrTypeTraitExpr" => {
+            // sizeof — Clang puts the name as "sizeof". The child is the
+            // operand (type or expr). We evaluate it as a constant if
+            // possible, otherwise fall back to the type size.
+            let type_str = node.qual_type().unwrap_or("unsigned long");
+            // The inner node, if present, gives us the operand type
+            let operand_type = node
+                .inner
+                .first()
+                .and_then(|n| n.qual_type())
+                .or_else(|| node.inner.first().and_then(|n| {
+                    // ParenExpr wrapping a type reference
+                    n.inner.first().and_then(|inner| inner.qual_type())
+                }));
+            let size = match operand_type {
+                Some(t) => estimate_type_size(t),
+                None => 8, // default to pointer size
+            };
+            let _ = type_str; // result type is unsigned long
+            Ok(Expr::SizeOf(size))
+        }
+
+        "StmtExpr" => {
+            // GNU statement expression: ({ stmt; stmt; expr; })
+            // The child is a CompoundStmt. The value is the last expression.
+            if node.inner.is_empty() {
+                bail!("StmtExpr with no children");
+            }
+            let compound = &node.inner[0];
+            if compound.inner.is_empty() {
+                return Ok(Expr::IntLit(0, IntWidth::W32));
+            }
+            let last_idx = compound.inner.len() - 1;
+            let stmts: Result<Vec<Stmt>> = compound.inner[..last_idx]
+                .iter()
+                .map(convert_stmt)
+                .collect();
+            let last_expr = convert_expr(&compound.inner[last_idx])?;
+            Ok(Expr::StmtExpr(stmts?, Box::new(last_expr)))
+        }
+
+        "InitListExpr" => {
+            // Initialiser list: {expr, expr, ...}
+            // Children are the initialisers (may include ImplicitValueInitExpr for gaps)
+            let exprs: Result<Vec<Expr>> = node.inner.iter().map(convert_expr).collect();
+            Ok(Expr::InitList(exprs?))
+        }
+
+        "ImplicitValueInitExpr" => {
+            // Zero-initialisation for struct/array members not explicitly initialised
+            // We represent as an integer zero of the appropriate type
+            let ty = node.qual_type().unwrap_or("int");
+            let width = type_to_int_width(ty);
+            Ok(Expr::IntLit(0, width))
+        }
+
+        "ConstantExpr" => {
+            // Wrapper around a compile-time constant — look through to inner
+            if node.inner.is_empty() {
+                // Some ConstantExpr have a value directly
+                let val: i64 = node
+                    .value
+                    .as_deref()
+                    .unwrap_or("0")
+                    .parse()
+                    .unwrap_or(0);
+                Ok(Expr::IntLit(val, IntWidth::W32))
+            } else {
+                convert_expr(&node.inner[0])
+            }
+        }
+
+        // Empty nodes (Clang emits {} for synthetic placeholders)
+        "" => Ok(Expr::IntLit(0, IntWidth::W32)),
 
         _ => Err(anyhow!(
             "unrecognised expression kind: '{}' (type: {:?})",
@@ -557,5 +961,28 @@ fn type_to_int_width(type_str: &str) -> IntWidth {
         s if s.contains("16") || s.contains("short") => IntWidth::W16,
         s if s.contains("8") || s.contains("char") => IntWidth::W8,
         _ => IntWidth::W32,
+    }
+}
+
+/// Estimate the byte size of a C type from its string representation.
+/// Used for sizeof() evaluation.
+fn estimate_type_size(type_str: &str) -> u64 {
+    let s = type_str.trim();
+    // Pointer types
+    if s.ends_with('*') {
+        return 8;
+    }
+    match s {
+        "void" => 0,
+        "_Bool" | "bool" => 1,
+        "unsigned char" | "__u8" | "uint8_t" | "u8"
+        | "signed char" | "__s8" | "int8_t" | "s8" | "char" => 1,
+        "unsigned short" | "__u16" | "uint16_t" | "u16"
+        | "short" | "__s16" | "int16_t" | "s16" => 2,
+        "unsigned int" | "__u32" | "uint32_t" | "u32"
+        | "int" | "__s32" | "int32_t" | "s32" => 4,
+        "unsigned long" | "unsigned long long" | "__u64" | "uint64_t" | "u64"
+        | "long" | "long long" | "__s64" | "int64_t" | "s64" => 8,
+        _ => 8, // default to pointer size for unknown types (structs etc.)
     }
 }

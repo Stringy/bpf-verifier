@@ -205,6 +205,52 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize) {
         Stmt::Compound(stmts) => {
             emit_stmts(out, stmts, indent);
         }
+
+        Stmt::Goto(label) => {
+            write!(out, "{}Nop (* goto {} *)", pad, label).unwrap();
+        }
+
+        Stmt::Label(label, body) => {
+            writeln!(out, "{} (* label: {} *)", pad, label).unwrap();
+            emit_stmt(out, body, indent);
+        }
+
+        Stmt::Switch(cond, cases) => {
+            // Emit as nested If-else chain
+            let mut first = true;
+            for case in cases {
+                if let Some(ref val) = case.value {
+                    if !first {
+                        writeln!(out, ")").unwrap();
+                        writeln!(out, "{}(", pad).unwrap();
+                    }
+                    writeln!(out, "{}If (BinOp Eq (", pad).unwrap();
+                    emit_expr(out, cond);
+                    write!(out, ") (").unwrap();
+                    emit_expr(out, val);
+                    writeln!(out, ") ())").unwrap();
+                    writeln!(out, "{}  (", pad).unwrap();
+                    emit_stmts(out, &case.body, indent + 4);
+                    writeln!(out, ")").unwrap();
+                    write!(out, "{}  (", pad).unwrap();
+                    first = false;
+                } else {
+                    // default case
+                    if !first {
+                        // Close the else branch of previous if
+                    }
+                    emit_stmts(out, &case.body, indent);
+                }
+            }
+            if !first {
+                // Close trailing else with Nop
+                write!(out, "Nop)").unwrap();
+            }
+        }
+
+        Stmt::Break => {
+            write!(out, "{}Nop (* break *)", pad).unwrap();
+        }
     }
 }
 
@@ -266,6 +312,43 @@ fn emit_expr(out: &mut String, expr: &Expr) {
                 emit_expr_brief(then_e),
                 emit_expr_brief(else_e)
             ).unwrap();
+        }
+
+        Expr::ArraySubscript(base, index) => {
+            // arr[idx] — model as pointer arithmetic + deref
+            write!(out, "Deref (PtrAdd (").unwrap();
+            emit_expr(out, base);
+            write!(out, ") (").unwrap();
+            emit_expr(out, index);
+            write!(out, "))").unwrap();
+        }
+
+        Expr::SizeOf(size) => {
+            write!(out, "IntLit ({}) W64", size).unwrap();
+        }
+
+        Expr::StringLit(s) => {
+            write!(out, "(* string: \"{}\" *) IntLit 0 W64", s.escape_default()).unwrap();
+        }
+
+        Expr::StmtExpr(stmts, final_expr) => {
+            // GNU statement expression — emit the statements then the final expr
+            write!(out, "(* stmt_expr: ").unwrap();
+            for _s in stmts {
+                write!(out, "...; ").unwrap();
+            }
+            write!(out, "{} *) ", emit_expr_brief(final_expr)).unwrap();
+            emit_expr(out, final_expr);
+        }
+
+        Expr::InitList(exprs) => {
+            // Initialiser list — emit as a comment with the values
+            write!(out, "(* init_list: [").unwrap();
+            for (i, e) in exprs.iter().enumerate() {
+                if i > 0 { write!(out, ", ").unwrap(); }
+                write!(out, "{}", emit_expr_brief(e)).unwrap();
+            }
+            write!(out, "] *) IntLit 0 W32").unwrap();
         }
     }
 }
@@ -432,6 +515,16 @@ fn emit_expr_brief(expr: &Expr) -> String {
         }
         Expr::Ternary(c, t, e) => {
             format!("{} ? {} : {}", emit_expr_brief(c), emit_expr_brief(t), emit_expr_brief(e))
+        }
+        Expr::ArraySubscript(base, index) => {
+            format!("{}[{}]", emit_expr_brief(base), emit_expr_brief(index))
+        }
+        Expr::SizeOf(size) => format!("sizeof({})", size),
+        Expr::StringLit(s) => format!("\"{}\"", s),
+        Expr::StmtExpr(_, expr) => format!("({{...; {}}})", emit_expr_brief(expr)),
+        Expr::InitList(exprs) => {
+            let items: Vec<String> = exprs.iter().map(|e| emit_expr_brief(e)).collect();
+            format!("{{{}}}", items.join(", "))
         }
     }
 }
